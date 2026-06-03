@@ -1,8 +1,8 @@
-from qa_gen_bot.xml_parser import parse_llm_output
+from qa_gen_bot.xml_parser import parse_generation_output
 
 
 def test_rejects_path_traversal():
-    out = parse_llm_output(
+    out = parse_generation_output(
         '<file path="../../../etc/passwd">x</file>'
         '<file path="src/test/ok.java">class Ok {}</file>'
     )

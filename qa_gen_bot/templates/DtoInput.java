@@ -6,7 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 /**
- * Request body DTO (scaffold). LLM may extend fields from OpenAPI schema.
+ * Request body DTO (scaffold). Additional fields may come from OpenAPI schema.
  */
 @Data
 @Builder

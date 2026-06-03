@@ -1,4 +1,4 @@
-"""Build fixtures/order-management-llm-cache.json for $0 local runs (no Claude)."""
+"""Build fixtures/order-management-gen-cache.json for local runs without API calls."""
 from __future__ import annotations
 
 import json
@@ -164,7 +164,7 @@ class OrderNotFoundTest extends WireMockBaseTest {{
 
 
 def main() -> None:
-    out = _ROOT / "fixtures" / "order-management-llm-cache.json"
+    out = _ROOT / "fixtures" / "order-management-gen-cache.json"
     payload = {
         "version": 1,
         "spec_path": "fixtures/order-management-api.json",
@@ -172,7 +172,7 @@ def main() -> None:
         "files": FILES,
     }
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Wrote {len(FILES)} LLM files -> {out}")
+    print(f"Wrote {len(FILES)} files -> {out}")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Proven Maven scaffold merged with LLM output."""
+"""Proven Maven scaffold merged with generated output."""
 from __future__ import annotations
 
 import re
@@ -9,22 +9,31 @@ from qa_gen_bot.spec_parser import SpecAnalysis
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
-# Protected from LLM merge (scaffold always wins)
+# Protected from merge (scaffold always wins)
 PROTECTED_SUFFIXES = (
     "pom.xml",
     "src/main/resources/config.properties",
     "src/main/resources/logback.xml",
 )
 
-PROTECTED_FRAGMENTS = (
+PROTECTED_FRAGMENTS_COMMON = (
     "/config/ConfigManager.java",
     "/base/BaseTest.java",
-    "/base/WireMockBaseTest.java",
-    "/tests/WireMock405Test.java",
     "/utils/TestDataGenerator.java",
     "/client/",
     "/dto/request/",
 )
+
+PROTECTED_FRAGMENTS_WIREMOCK = (
+    "/base/WireMockBaseTest.java",
+    "/tests/WireMock405Test.java",
+)
+
+
+def protected_fragments(*, uses_wiremock: bool) -> tuple[str, ...]:
+    if uses_wiremock:
+        return PROTECTED_FRAGMENTS_COMMON + PROTECTED_FRAGMENTS_WIREMOCK
+    return PROTECTED_FRAGMENTS_COMMON
 
 
 def _primary_resource(analysis: SpecAnalysis) -> str:
@@ -369,7 +378,7 @@ def _build_request_dto_files(
 
 
 def all_request_dto_class_names(analysis: SpecAnalysis) -> list[str]:
-    """All *InputDto class names from POST body schemas (for LLM hints)."""
+    """All *InputDto class names from POST body schemas (for generation hints)."""
     post_schemas = _find_all_post_request_schemas(analysis)
     if not post_schemas:
         return [_dto_input_name(_primary_resource(analysis))]
@@ -671,14 +680,20 @@ def _normalize_path(path: str) -> str:
     return path.strip().replace("\\", "/")
 
 
-def is_protected_path(path: str) -> bool:
+def is_protected_path(path: str, *, uses_wiremock: bool = True) -> bool:
     p = _normalize_path(path)
     if any(p.endswith(s) for s in PROTECTED_SUFFIXES):
         return True
-    return any(fragment in p for fragment in PROTECTED_FRAGMENTS)
+    return any(fragment in p for fragment in protected_fragments(uses_wiremock=uses_wiremock))
 
 
-def _readme_for_scaffold(analysis: SpecAnalysis, base_url: str, pkg: str) -> str:
+def _readme_for_scaffold(
+    analysis: SpecAnalysis,
+    base_url: str,
+    pkg: str,
+    *,
+    uses_wiremock: bool,
+) -> str:
     ops_hint = ""
     if uses_operation_centric_client(analysis):
         op_ids = [
@@ -694,17 +709,27 @@ def _readme_for_scaffold(analysis: SpecAnalysis, base_url: str, pkg: str) -> str
             )
         else:
             ops_hint = "\n- Client: one method per OpenAPI operation (not CRUD).\n"
+    if uses_wiremock:
+        maven_block = (
+            "```bash\n"
+            "mvn test              # WireMock tests (default profile)\n"
+            "mvn test -Plive       # *IntegrationTest against base.url\n"
+            "```\n"
+        )
+    else:
+        maven_block = (
+            "```bash\n"
+            "mvn test              # *IntegrationTest against base.url\n"
+            "```\n"
+        )
     return (
         f"# {analysis.title} — QA Framework\n\n"
         "## Maven\n\n"
-        "```bash\n"
-        "mvn test              # wiremock profile (default): WireMock tests only\n"
-        "mvn test -Plive       # *IntegrationTest against base.url\n"
-        "mvn test -Pwiremock   # same as default\n"
-        "```\n"
+        f"{maven_block}"
         f"{ops_hint}\n"
         f"- Base URL: `{base_url}` (override: `-Dbase.url=...`)\n"
         f"- Package: `{pkg}`\n"
+        f"- Profile: {'contract-mocks' if uses_wiremock else 'integration-only'}\n"
     )
 
 
@@ -712,6 +737,7 @@ def build_scaffold(
     analysis: SpecAnalysis,
     *,
     base_url_override: str | None = None,
+    uses_wiremock: bool = True,
 ) -> dict[str, str]:
     pkg = f"com.{analysis.package_hint}"
     pkg_path = pkg.replace(".", "/")
@@ -743,8 +769,9 @@ def build_scaffold(
         "ID_PATH_SUFFIX": id_path_suffix,
     }
 
+    pom_template = "pom.xml" if uses_wiremock else "pom_integration.xml"
     files: dict[str, str] = {
-        "pom.xml": _render(_load_template("pom.xml"), vars_map),
+        "pom.xml": _render(_load_template(pom_template), vars_map),
         "src/main/resources/config.properties": _render(
             _load_template("config.properties"), vars_map
         ),
@@ -756,43 +783,52 @@ def build_scaffold(
         f"src/test/java/{pkg_path}/base/BaseTest.java": _render(
             _load_template("BaseTest.java"), vars_map
         ),
-        f"src/test/java/{pkg_path}/base/WireMockBaseTest.java": _render(
-            _load_template("WireMockBaseTest.java"), vars_map
-        ),
         f"src/test/java/{pkg_path}/utils/TestDataGenerator.java": _render(
             _load_template("TestDataGenerator.java"), vars_map
-        ),
-        f"src/test/java/{pkg_path}/tests/WireMock405Test.java": _render(
-            _load_template("WireMock405Test.java"), vars_map
         ),
         f"src/test/java/{pkg_path}/client/{client_class}.java": _build_api_client_source(
             analysis, pkg, client_class, dto_input, resource, vars_map
         ),
-        "README.md": _readme_for_scaffold(analysis, base_url, pkg),
+        "README.md": _readme_for_scaffold(
+            analysis, base_url, pkg, uses_wiremock=uses_wiremock
+        ),
     }
+    if uses_wiremock:
+        files[f"src/test/java/{pkg_path}/base/WireMockBaseTest.java"] = _render(
+            _load_template("WireMockBaseTest.java"), vars_map
+        )
+        files[f"src/test/java/{pkg_path}/tests/WireMock405Test.java"] = _render(
+            _load_template("WireMock405Test.java"), vars_map
+        )
     return files
 
 
 def merge_with_scaffold(
-    llm_files: dict[str, str],
+    generated_files: dict[str, str],
     scaffold: dict[str, str],
+    *,
+    uses_wiremock: bool = True,
 ) -> dict[str, str]:
-    """LLM first; scaffold fills gaps; protected paths always from templates."""
-    merged = {_normalize_path(k): v for k, v in llm_files.items()}
+    """Generated files first; scaffold fills gaps; protected paths from templates."""
+    merged = {_normalize_path(k): v for k, v in generated_files.items()}
     for path, content in scaffold.items():
         p = _normalize_path(path)
-        if is_protected_path(p) or p not in merged:
+        if is_protected_path(p, uses_wiremock=uses_wiremock) or p not in merged:
             merged[p] = content
     for path, content in scaffold.items():
-        if is_protected_path(path):
+        if is_protected_path(path, uses_wiremock=uses_wiremock):
             merged[_normalize_path(path)] = content
     return merged
 
 
-def strip_llm_protected(llm_files: dict[str, str]) -> dict[str, str]:
-    """Remove protected paths from LLM output before merge (saves tokens in gate)."""
+def strip_generated_protected(
+    generated_files: dict[str, str],
+    *,
+    uses_wiremock: bool = True,
+) -> dict[str, str]:
+    """Remove protected paths from API output before merge."""
     return {
         p: c
-        for p, c in llm_files.items()
-        if not is_protected_path(p)
+        for p, c in generated_files.items()
+        if not is_protected_path(p, uses_wiremock=uses_wiremock)
     }

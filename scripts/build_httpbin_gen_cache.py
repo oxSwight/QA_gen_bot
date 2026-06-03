@@ -1,4 +1,4 @@
-"""Extract httpbin LLM files from out_local ZIP into fixtures cache."""
+"""Extract httpbin generated files from out_local ZIP into fixtures cache."""
 from __future__ import annotations
 
 import sys
@@ -9,11 +9,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from qa_gen_bot.llm_cache import save_llm_cache
+from qa_gen_bot.gen_cache import save_gen_cache
 from qa_gen_bot.scaffold import is_protected_path
 
 ZIP = _ROOT / "out_local" / "httpbinlivetestingapi-qa-framework.zip"
-OUT = _ROOT / "fixtures" / "httpbin-llm-cache.json"
+OUT = _ROOT / "fixtures" / "httpbin-gen-cache.json"
 SPEC = _ROOT / "fixtures" / "httpbin-live-testing-api.json"
 PKG = "com/httpbinlivetestingapi"
 
@@ -47,7 +47,7 @@ def main() -> None:
                 continue
             files[p] = zf.read(name).decode("utf-8")
 
-    save_llm_cache(
+    save_gen_cache(
         OUT,
         spec_path=str(SPEC),
         package_hint="httpbinlivetestingapi",

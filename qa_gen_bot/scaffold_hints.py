@@ -1,4 +1,4 @@
-"""Canonical names from scaffold for LLM prompts (must match build_scaffold)."""
+"""Canonical names from scaffold for generation prompts (must match build_scaffold)."""
 from __future__ import annotations
 
 from qa_gen_bot.scaffold import (
@@ -12,7 +12,7 @@ from qa_gen_bot.scaffold import (
 from qa_gen_bot.spec_parser import SpecAnalysis
 
 
-def build_scaffold_hints(analysis: SpecAnalysis) -> str:
+def build_scaffold_hints(analysis: SpecAnalysis, *, uses_wiremock: bool = True) -> str:
     pkg = f"com.{analysis.package_hint}"
     resource = _primary_resource(analysis)
     client = _client_class_name(resource)
@@ -47,6 +47,19 @@ def build_scaffold_hints(analysis: SpecAnalysis) -> str:
             f"(getAll, getById, create, update, delete)\n"
             "  — getById/delete/update: id типа long для petId (не String)\n"
         )
+    wiremock_lines = ""
+    if uses_wiremock:
+        wiremock_lines = (
+            f"• WireMockBaseTest: {pkg}.base.WireMockBaseTest — stubFor; "
+            f"client = new {client}(wireMockSpec)\n"
+            "• WireMock405Test — уже есть, не перезаписывай\n"
+        )
+    else:
+        wiremock_lines = (
+            "• Профиль integration-only: только BaseTest + *IntegrationTest.java на base.url\n"
+            "• НЕ используй WireMock/stubFor/WireMockBaseTest\n"
+        )
+
     return f"""\
 === Scaffold (уже в проекте — НЕ генерируй эти файлы) ===
 • Package: {pkg}
@@ -55,8 +68,35 @@ def build_scaffold_hints(analysis: SpecAnalysis) -> str:
 {dto_lines}
 • User*Test → UserInputDto; Store*Test → OrderInputDto; Pet*Test → {dto}
 {nested_line}• НЕ создавай дубликаты *Dto в dto/request/ — используй имена выше (OrderItemDto, не OrderItem).
-• BaseTest: {pkg}.base.BaseTest (requestSpec) — обычные API-тесты
-• WireMockBaseTest: {pkg}.base.WireMockBaseTest — stubFor; client = new {client}(wireMockSpec)
-• WireMock405Test — уже есть, не перезаписывай
-• Resource path: /{resource}
+• BaseTest: {pkg}.base.BaseTest (requestSpec) — интеграционные API-тесты
+{wiremock_lines}• Resource path: /{resource}
+"""
+
+
+def build_repo_codegen_hints(analysis: SpecAnalysis, *, uses_wiremock: bool = True) -> str:
+    """Hints for Mode B: openapi-generator API packages (not hand-written client)."""
+    pkg = f"com.{analysis.package_hint}"
+    op_lines = "\n".join(
+        f"  — {op.method} {op.path}"
+        + (f" (operationId: {op.operation_id})" if op.operation_id else "")
+        for op in analysis.operations
+    )
+    wiremock = ""
+    if uses_wiremock:
+        wiremock = (
+            f"• WireMockBaseTest: {pkg}.base.WireMockBaseTest\n"
+            "• WireMock405Test — не перезаписывай\n"
+        )
+    else:
+        wiremock = "• Только *IntegrationTest.java extends BaseTest — без WireMock\n"
+    return f"""\
+=== Mode B: openapi-generator (НЕ генерируй client/dto/pom) ===
+• Package: {pkg}
+• После mvn generate-sources:
+  - API: {pkg}.api.* (DefaultApi / *Api — смотри сгенерированные имена)
+  - Models: {pkg}.model.*
+• Операции из спеки:
+{op_lines}
+• BaseTest: {pkg}.base.BaseTest — live API на base.url
+{wiremock}• Доп. файлы: только src/test/java и schemas
 """

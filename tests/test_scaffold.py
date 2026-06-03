@@ -41,7 +41,7 @@ def test_scaffold_fills_missing_request_dto():
     assert "class ItemInputDto" in merged[dto_key] or "InputDto" in merged[dto_key]
 
 
-def test_scaffold_keeps_llm_response_dto():
+def test_scaffold_keeps_generated_response_dto():
     spec = parse_spec_content(
         '{"openapi":"3.0.0","info":{"title":"Demo","version":"1"},'
         '"paths":{"/products":{"post":{}}}}'
@@ -170,7 +170,7 @@ def test_httpbin_live_spec_operation_centric_client():
     assert any("TestPayloadInputDto" in v for k, v in scaffold.items() if "/dto/request/" in k)
 
 
-def test_scaffold_protects_request_dto_from_llm_overwrite():
+def test_scaffold_protects_request_dto_from_generated_overwrite():
     spec = parse_spec_content(
         '{"openapi":"3.0.0","info":{"title":"Demo","version":"1"},'
         '"paths":{"/products":{"post":{}}}}'

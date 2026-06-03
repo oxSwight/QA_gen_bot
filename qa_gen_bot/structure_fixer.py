@@ -1,4 +1,4 @@
-"""Deterministic fixes before/after Maven (no LLM)."""
+"""Deterministic fixes before/after Maven (no API calls)."""
 from __future__ import annotations
 
 import re
@@ -101,7 +101,7 @@ def _insert_after_package(content: str, block: str) -> str:
 
 
 def remove_broken_wiremock_tests(files: dict[str, str]) -> FixResult:
-    """Drop LLM *WireMock* tests that still confuse matchers (scaffold 405 remains)."""
+    """Drop generated *WireMock* tests that confuse matchers (scaffold 405 remains)."""
     out = dict(files)
     applied: list[str] = []
     for path, content in list(files.items()):
@@ -282,6 +282,8 @@ def autofix_from_maven_log(
     files: dict[str, str],
     log: str,
     base_package: str,
+    *,
+    uses_wiremock: bool = True,
 ) -> FixResult:
     applied: list[str] = []
     current = files
@@ -321,17 +323,18 @@ def autofix_from_maven_log(
         fixes.append(lambda f: fix_base_class_extends(f, base_package))
     if "requestSpec" in log or "cyclic inheritance" in log:
         fixes.append(lambda f: fix_request_spec_reference(f, base_package))
-    if "symbol:   variable requestSpec" in log or "variable requestSpec" in log:
-        fixes.append(lambda f: fix_wiremock_request_spec(f, base_package))
-    if "StringValuePattern" in log or "WireMock" in log:
-        fixes.extend(
-            [
-                lambda f: fix_wiremock_test_base_class(f, base_package),
-                lambda f: fix_wiremock_request_spec(f, base_package),
-                lambda f: fix_wiremock_hamcrest_import_clash(f),
-                lambda f: remove_broken_wiremock_tests(f),
-            ]
-        )
+    if uses_wiremock:
+        if "symbol:   variable requestSpec" in log or "variable requestSpec" in log:
+            fixes.append(lambda f: fix_wiremock_request_spec(f, base_package))
+        if "StringValuePattern" in log or "WireMock" in log:
+            fixes.extend(
+                [
+                    lambda f: fix_wiremock_test_base_class(f, base_package),
+                    lambda f: fix_wiremock_request_spec(f, base_package),
+                    lambda f: fix_wiremock_hamcrest_import_clash(f),
+                    lambda f: remove_broken_wiremock_tests(f),
+                ]
+            )
     if "io.restassured" in log:
         fixes.append(move_restassured_clients_to_test)
 
@@ -508,7 +511,7 @@ def _pick_canonical_request_dto(
 
 
 def sync_client_dto_type(files: dict[str, str], base_package: str) -> FixResult:
-    """Align scaffold ApiClient create/update types with LLM dto/request classes."""
+    """Align scaffold ApiClient create/update types with generated dto/request classes."""
     out = dict(files)
     applied: list[str] = []
     dtos = _discover_request_dto_classes(out)
@@ -694,7 +697,7 @@ def _is_main_input_dto(name: str) -> bool:
 
 def sync_component_dto_suffix(files: dict[str, str]) -> FixResult:
     """
-    Тесты/LLM ожидают OrderItemDto, scaffold мог создать OrderItem.
+    Тесты ожидают OrderItemDto, scaffold мог создать OrderItem.
     Переименовывает класс и ссылки: OrderItem -> OrderItemDto.
     """
     out = dict(files)
@@ -869,10 +872,12 @@ def apply_all_structure_fixes(
     files: dict[str, str],
     base_package: str,
     scaffold: dict[str, str] | None = None,
+    *,
+    uses_wiremock: bool = True,
 ) -> FixResult:
     applied: list[str] = []
     current = files
-    for fixer in (
+    fixers: list = [
         lambda f: normalize_junit_and_base_imports(f, base_package),
         move_response_dtos_to_main,
         fix_single_arg_client_update,
@@ -886,13 +891,23 @@ def apply_all_structure_fixes(
         fix_getbyid_string_literal_calls,
         lambda f: sync_component_dto_suffix(f),
         lambda f: rename_base_tests_to_integration(f, base_package),
-        lambda f: fix_wiremock_test_base_class(f, base_package),
-        lambda f: fix_wiremock_request_spec(f, base_package),
-        lambda f: fix_request_spec_reference(f, base_package),
-        lambda f: fix_wiremock_hamcrest_import_clash(f),
-        lambda f: remove_broken_wiremock_tests(f),
-        lambda f: move_restassured_clients_to_test(f),
-    ):
+    ]
+    if uses_wiremock:
+        fixers.extend(
+            [
+                lambda f: fix_wiremock_test_base_class(f, base_package),
+                lambda f: fix_wiremock_request_spec(f, base_package),
+                lambda f: fix_wiremock_hamcrest_import_clash(f),
+                lambda f: remove_broken_wiremock_tests(f),
+            ]
+        )
+    fixers.extend(
+        [
+            lambda f: fix_request_spec_reference(f, base_package),
+            lambda f: move_restassured_clients_to_test(f),
+        ]
+    )
+    for fixer in fixers:
         result = fixer(current)
         current = result.files
         applied.extend(result.applied)

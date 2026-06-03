@@ -1,15 +1,15 @@
-"""Extract swaggerpetstore LLM files from out_local ZIP into fixtures cache."""
+"""Extract petstore generated files from out_local ZIP into fixtures cache."""
 from __future__ import annotations
 
 import zipfile
 from pathlib import Path
 
-from qa_gen_bot.llm_cache import save_llm_cache
+from qa_gen_bot.gen_cache import save_gen_cache
 from qa_gen_bot.scaffold import is_protected_path
 
 _ROOT = Path(__file__).resolve().parents[1]
 ZIP = _ROOT / "out_local" / "swaggerpetstore-qa-framework.zip"
-OUT = _ROOT / "fixtures" / "petstore-llm-cache.json"
+OUT = _ROOT / "fixtures" / "petstore-gen-cache.json"
 SPEC = _ROOT / "fixtures" / "petstore-swagger-api.json"
 PKG = "com/swaggerpetstore"
 
@@ -34,7 +34,7 @@ def main() -> None:
                 continue
             if "/schemas/product" in p:
                 continue
-            # LLM sometimes puts response DTOs under src/test — normalize to main
+            # Generated output sometimes puts response DTOs under src/test — normalize to main
             if "/src/test/java/" in p and "/dto/response/" in p:
                 p = p.replace("/src/test/java/", "/src/main/java/", 1)
             if p in files:
@@ -89,7 +89,7 @@ def main() -> None:
             )
         )
 
-    save_llm_cache(
+    save_gen_cache(
         OUT,
         spec_path=str(SPEC),
         package_hint="swaggerpetstore",

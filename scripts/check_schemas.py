@@ -1,4 +1,4 @@
-"""CLI: verify schema refs in a cached LLM run resolve to files on disk."""
+"""CLI: verify schema refs in a cached run resolve to files on disk."""
 from __future__ import annotations
 
 import argparse
@@ -11,7 +11,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from qa_gen_bot.llm_cache import load_llm_cache
+from qa_gen_bot.gen_cache import load_gen_cache
 from qa_gen_bot.pipeline import _finalize_files
 from qa_gen_bot.scaffold import build_scaffold
 from qa_gen_bot.spec_parser import parse_spec_content
@@ -31,8 +31,8 @@ def main() -> None:
     parser.add_argument(
         "--cache",
         type=Path,
-        default=_ROOT / "out_local" / "llm_cache.json",
-        help="LLM cache JSON from run_local.py --save-cache",
+        default=_ROOT / "out_local" / "gen_cache.json",
+        help="Generation cache JSON from run_local.py --save-cache",
     )
     args = parser.parse_args()
 
@@ -43,8 +43,8 @@ def main() -> None:
 
     scaffold = build_scaffold(analysis)
     pkg = f"com.{analysis.package_hint}"
-    llm = load_llm_cache(args.cache, expected_package_hint=analysis.package_hint)
-    files, gate = _finalize_files(llm, scaffold, True, pkg, [])
+    cached = load_gen_cache(args.cache, expected_package_hint=analysis.package_hint)
+    files, gate = _finalize_files(cached, scaffold, True, pkg, [])
 
     logger.info("static gate passed=%s", gate.passed)
     schema_paths = [p for p in files if "/schemas/" in p.replace("\\", "/")]

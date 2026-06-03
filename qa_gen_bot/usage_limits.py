@@ -86,6 +86,14 @@ def get_quota_status(
     return _read_status_unlocked(data, user_id, max_runs)
 
 
+async def get_quota_status_async(
+    store_path: Path,
+    user_id: int,
+    max_runs: int,
+) -> QuotaStatus:
+    return await asyncio.to_thread(get_quota_status, store_path, user_id, max_runs)
+
+
 def _reserve_sync(
     store_path: Path,
     user_id: int,

@@ -1,4 +1,4 @@
-"""LLM-based framework generation (Anthropic) with retry and Maven feedback regen."""
+"""Remote API framework generation with retry and Maven feedback regen."""
 from __future__ import annotations
 
 import json
@@ -6,11 +6,16 @@ import logging
 
 from anthropic import AsyncAnthropic
 
-from qa_gen_bot.prompts import PHASE_TESTS_PROMPT, RETRY_PROMPT_SUFFIX, SYSTEM_PROMPT
+from qa_gen_bot.prompts import (
+    get_phase_tests_prompt,
+    get_retry_prompt_suffix,
+    get_system_prompt,
+)
 from qa_gen_bot.quality_gate import GateResult
-from qa_gen_bot.scaffold_hints import build_scaffold_hints
+from qa_gen_bot.scaffold_hints import build_repo_codegen_hints, build_scaffold_hints
 from qa_gen_bot.spec_parser import SpecAnalysis, build_spec_brief
-from qa_gen_bot.xml_parser import merge_file_maps, parse_llm_output
+from qa_gen_bot.generation_api import call_generation_messages
+from qa_gen_bot.xml_parser import merge_file_maps, parse_generation_output
 
 logger = logging.getLogger(__name__)
 
@@ -56,18 +61,36 @@ def _spec_json_for_prompt(raw_json: dict) -> str:
     return result
 
 
-def _build_user_message(analysis: SpecAnalysis, spec_json: str, extra: str = "") -> str:
+def _build_user_message(
+    analysis: SpecAnalysis,
+    spec_json: str,
+    extra: str = "",
+    *,
+    uses_wiremock: bool = True,
+    repo_mode: bool = False,
+) -> str:
     brief = build_spec_brief(analysis)
+    if repo_mode:
+        intro = (
+            "Сгенерируй только тесты (src/test/java) и опционально schemas. "
+            "API/DTO даст openapi-generator — не создавай client/dto/pom."
+        )
+        hints = build_repo_codegen_hints(analysis, uses_wiremock=uses_wiremock)
+    else:
+        intro = (
+            "Сгенерируй файлы для тестового фреймворка (DTO, client, tests, schemas). "
+            "pom.xml и base-классы уже в scaffold — не дублируй."
+        )
+        hints = build_scaffold_hints(analysis, uses_wiremock=uses_wiremock)
     parts = [
-        "Сгенерируй файлы для тестового фреймворка (DTO, client, tests, schemas).",
-        "pom.xml и base-классы уже в scaffold — не дублируй.",
+        intro,
         "",
         "=== Краткий разбор спеки ===",
         brief,
         "",
         f"Используй Java package: com.{analysis.package_hint}",
         "",
-        build_scaffold_hints(analysis),
+        hints,
         "",
         "=== OpenAPI / Swagger JSON ===",
         spec_json,
@@ -77,16 +100,31 @@ def _build_user_message(analysis: SpecAnalysis, spec_json: str, extra: str = "")
     return "\n".join(parts)
 
 
-def _llm_batch_ok(files: dict[str, str]) -> bool:
+def _output_batch_ok(
+    files: dict[str, str],
+    *,
+    uses_wiremock: bool = True,
+    repo_mode: bool = False,
+) -> bool:
     """Light check only — full gate runs after scaffold merge in pipeline."""
-    if len(files) < 2:
+    if repo_mode:
+        from qa_gen_bot.codegen.repo_output_filter import filter_repo_generated_files
+
+        files = filter_repo_generated_files(files)
+    if len(files) < 1:
         return False
     java_tests = [
         p
-        for p in files
+        for p, content in files.items()
         if p.endswith(".java") and "/tests/" in p.replace("\\", "/")
     ]
-    return len(java_tests) >= 1 or any("@Test" in c for c in files.values())
+    if not java_tests and not any("@Test" in c for c in files.values()):
+        return False
+    if uses_wiremock:
+        return len(java_tests) >= 1
+    return any(
+        p.replace("\\", "/").endswith("IntegrationTest.java") for p in java_tests
+    ) or any("@Test" in files.get(p, "") for p in java_tests)
 
 
 async def _call_claude(
@@ -96,15 +134,18 @@ async def _call_claude(
     max_tokens: int,
     system: str,
     user_content: str,
+    timeout_sec: float,
+    api_max_retries: int,
 ) -> str:
-    response = await client.messages.create(
+    return await call_generation_messages(
+        client,
         model=model,
         max_tokens=max_tokens,
-        temperature=0,
         system=system,
-        messages=[{"role": "user", "content": user_content}],
+        user_content=user_content,
+        timeout_sec=timeout_sec,
+        max_api_retries=api_max_retries,
     )
-    return response.content[0].text
 
 
 async def _phase_tests_topup(
@@ -115,21 +156,27 @@ async def _phase_tests_topup(
     analysis: SpecAnalysis,
     spec_json: str,
     existing_files: dict[str, str],
+    uses_wiremock: bool,
+    repo_mode: bool,
+    anthropic_timeout_sec: float,
+    anthropic_api_max_retries: int,
 ) -> dict[str, str]:
     file_list = "\n".join(f"- {p}" for p in sorted(existing_files))
     user_content = (
-        f"{_build_user_message(analysis, spec_json)}\n\n"
+        f"{_build_user_message(analysis, spec_json, uses_wiremock=uses_wiremock, repo_mode=repo_mode)}\n\n"
         f"Уже сгенерированы файлы:\n{file_list}\n\n"
-        "Верни только недостающие/исправленные файлы (tests, schemas, client)."
+        "Верни только недостающие/исправленные файлы (tests, schemas)."
     )
     text = await _call_claude(
         client,
         model=model,
         max_tokens=max_tokens,
-        system=PHASE_TESTS_PROMPT,
+        system=get_phase_tests_prompt(uses_wiremock=uses_wiremock, repo_mode=repo_mode),
         user_content=user_content,
+        timeout_sec=anthropic_timeout_sec,
+        api_max_retries=anthropic_api_max_retries,
     )
-    parsed = parse_llm_output(text)
+    parsed = parse_generation_output(text)
     return merge_file_maps(existing_files, parsed.files)
 
 
@@ -141,39 +188,58 @@ async def generate_framework(
     model: str,
     max_tokens: int,
     max_retries: int,
+    uses_wiremock: bool = True,
+    repo_mode: bool = False,
+    anthropic_timeout_sec: float = 600.0,
+    anthropic_api_max_retries: int = 2,
     on_progress=None,
 ) -> tuple[dict[str, str], GateResult, list[str]]:
     """
-    Returns (llm_files, lightweight_status, log).
+    Returns (generated_files, lightweight_status, log).
     Full quality gate runs in pipeline after scaffold merge.
     """
     log: list[str] = []
     spec_json = _spec_json_for_prompt(analysis.raw_json)
-    user_message = _build_user_message(analysis, spec_json)
+    user_message = _build_user_message(
+        analysis, spec_json, uses_wiremock=uses_wiremock, repo_mode=repo_mode
+    )
+    system_prompt = get_system_prompt(uses_wiremock=uses_wiremock, repo_mode=repo_mode)
 
     files: dict[str, str] = {}
-    status = GateResult(passed=False, errors=["Генерация не запускалась."])
+    status = GateResult(passed=False, errors=["Запрос к сервису не выполнялся."])
 
     total_attempts = max_retries + 1
     for attempt in range(1, max_retries + 2):
-        log.append(f"Попытка {attempt}: запрос к модели...")
+        log.append(f"Попытка {attempt}: запрос к API…")
         if on_progress:
-            await on_progress("Генерация", f"{attempt}/{total_attempts}")
-        extra = RETRY_PROMPT_SUFFIX if attempt > 1 else ""
+            await on_progress("Сборка", f"{attempt}/{total_attempts}")
+        extra = (
+            get_retry_prompt_suffix(uses_wiremock=uses_wiremock, repo_mode=repo_mode)
+            if attempt > 1
+            else ""
+        )
 
         text = await _call_claude(
             client,
             model=model,
             max_tokens=max_tokens,
-            system=SYSTEM_PROMPT,
-            user_content=_build_user_message(analysis, spec_json, extra=extra)
+            system=system_prompt,
+            user_content=_build_user_message(
+                analysis,
+                spec_json,
+                extra=extra,
+                uses_wiremock=uses_wiremock,
+                repo_mode=repo_mode,
+            )
             if extra
             else user_message,
+            timeout_sec=anthropic_timeout_sec,
+            api_max_retries=anthropic_api_max_retries,
         )
-        parsed = parse_llm_output(text)
+        parsed = parse_generation_output(text)
 
-        if parsed.llm_error:
-            raise ValueError(f"Модель отказала: {parsed.llm_error}")
+        if parsed.refusal_text:
+            raise ValueError(f"Сервис отклонил запрос: {parsed.refusal_text}")
 
         if not parsed.files:
             status = GateResult(
@@ -186,21 +252,25 @@ async def generate_framework(
         files = parsed.files
         log.append(f"Получено файлов: {len(files)}")
 
-        if _llm_batch_ok(files):
+        if _output_batch_ok(files, uses_wiremock=uses_wiremock, repo_mode=repo_mode):
             status = GateResult(passed=True)
-            log.append("LLM batch: OK (полный gate после scaffold)")
+            log.append("Пакет файлов: OK (полный gate после scaffold)")
+            if repo_mode:
+                from qa_gen_bot.codegen.repo_output_filter import filter_repo_generated_files
+
+                files = filter_repo_generated_files(files)
             return files, status, log
 
-        log.append("LLM batch: мало файлов, повтор…")
+        log.append("Пакет файлов: мало файлов, повтор…")
         status = GateResult(
             passed=False,
-            errors=["Мало файлов от модели — нужен повтор."],
+            errors=["Недостаточно файлов в ответе — нужен повтор."],
         )
 
         if attempt == max_retries + 1:
             log.append("Доп. фаза: недостающие тесты…")
             if on_progress:
-                await on_progress("Генерация", "доп. тесты")
+                await on_progress("Сборка", "доп. тесты")
             files = await _phase_tests_topup(
                 client,
                 model=model,
@@ -208,10 +278,18 @@ async def generate_framework(
                 analysis=analysis,
                 spec_json=spec_json,
                 existing_files=files,
+                uses_wiremock=uses_wiremock,
+                repo_mode=repo_mode,
+                anthropic_timeout_sec=anthropic_timeout_sec,
+                anthropic_api_max_retries=anthropic_api_max_retries,
             )
-            if _llm_batch_ok(files):
+            if _output_batch_ok(files, uses_wiremock=uses_wiremock, repo_mode=repo_mode):
                 status = GateResult(passed=True)
-                log.append("LLM batch после доп. фазы: OK")
+                log.append("Пакет файлов после доп. фазы: OK")
+                if repo_mode:
+                    from qa_gen_bot.codegen.repo_output_filter import filter_repo_generated_files
+
+                    files = filter_repo_generated_files(files)
                 return files, status, log
 
     return files, status, log
@@ -226,6 +304,10 @@ async def regenerate_with_feedback(
     feedback: str,
     model: str,
     max_tokens: int,
+    uses_wiremock: bool = True,
+    repo_mode: bool = False,
+    anthropic_timeout_sec: float = 600.0,
+    anthropic_api_max_retries: int = 2,
     on_progress=None,
 ) -> tuple[dict[str, str], GateResult, list[str]]:
     log: list[str] = ["Перегенерация по feedback Maven…"]
@@ -234,7 +316,7 @@ async def regenerate_with_feedback(
 
     spec_json = _spec_json_for_prompt(analysis.raw_json)
     extra = (
-        f"{RETRY_PROMPT_SUFFIX}\n\n"
+        f"{get_retry_prompt_suffix(uses_wiremock=uses_wiremock, repo_mode=repo_mode)}\n\n"
         f"=== FEEDBACK ===\n{feedback}\n\n"
         f"Верни исправленные файлы (не трогай base/, pom.xml)."
     )
@@ -242,15 +324,29 @@ async def regenerate_with_feedback(
         client,
         model=model,
         max_tokens=max_tokens,
-        system=SYSTEM_PROMPT,
-        user_content=_build_user_message(analysis, spec_json, extra=extra),
+        system=get_system_prompt(uses_wiremock=uses_wiremock, repo_mode=repo_mode),
+        user_content=_build_user_message(
+            analysis,
+            spec_json,
+            extra=extra,
+            uses_wiremock=uses_wiremock,
+            repo_mode=repo_mode,
+        ),
+        timeout_sec=anthropic_timeout_sec,
+        api_max_retries=anthropic_api_max_retries,
     )
-    parsed = parse_llm_output(text)
-    if parsed.llm_error:
-        raise ValueError(f"Модель отказала: {parsed.llm_error}")
+    parsed = parse_generation_output(text)
+    if parsed.refusal_text:
+        raise ValueError(f"Сервис отклонил запрос: {parsed.refusal_text}")
 
-    files = merge_file_maps(existing_files, parsed.files) if parsed.files else existing_files
+    if repo_mode and parsed.files:
+        from qa_gen_bot.codegen.repo_output_filter import filter_repo_generated_files
+
+        patch = filter_repo_generated_files(parsed.files)
+        files = merge_file_maps(existing_files, patch)
+    else:
+        files = merge_file_maps(existing_files, parsed.files) if parsed.files else existing_files
     log.append(f"Файлов после merge: {len(files)}")
-    ok = _llm_batch_ok(files)
+    ok = _output_batch_ok(files, uses_wiremock=uses_wiremock, repo_mode=repo_mode)
     status = GateResult(passed=ok, errors=[] if ok else ["Мало файлов после regen"])
     return files, status, log

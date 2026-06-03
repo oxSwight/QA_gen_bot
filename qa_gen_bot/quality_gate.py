@@ -195,22 +195,22 @@ def _check_base_test_surefire_exposure(files: dict[str, str]) -> list[str]:
     return errors
 
 
-def validate_generated_project(files: dict[str, str]) -> GateResult:
+def _validate_common(
+    files: dict[str, str],
+) -> tuple[list[str], list[str], str, int] | None:
+    """Shared checks. Returns None if files empty (early exit)."""
     errors: list[str] = []
     warnings: list[str] = []
 
     if not files:
-        errors.append("Модель не вернула ни одного <file> тега.")
-        return GateResult(passed=False, errors=errors)
+        errors.append("Пустой набор файлов (нет <file> в ответе).")
+        return errors, warnings, "", 0
 
     if not _has_path(files, "pom.xml"):
         errors.append("Отсутствует pom.xml.")
 
     if not any("/base/BaseTest.java" in p.replace("\\", "/") for p in files):
         errors.append("Отсутствует scaffold: src/test/.../base/BaseTest.java")
-
-    if not any("/base/WireMockBaseTest.java" in p.replace("\\", "/") for p in files):
-        errors.append("Отсутствует scaffold: WireMockBaseTest.java")
 
     for path, content in _java_files(files).items():
         if path.replace("\\", "/").endswith("/base/BaseTest.java"):
@@ -235,9 +235,26 @@ def validate_generated_project(files: dict[str, str]) -> GateResult:
     )
     if test_class_count < 1:
         errors.append("Нет тестовых классов в src/test/java с @Test.")
-    elif test_class_count < 3:
+
+    return errors, warnings, blob, test_class_count
+
+
+def _validate_contract_mocks(
+    files: dict[str, str],
+    blob: str,
+    test_class_count: int,
+    request_dtos: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not any("/base/WireMockBaseTest.java" in p.replace("\\", "/") for p in files):
+        errors.append("Отсутствует scaffold: WireMockBaseTest.java")
+
+    if test_class_count < 3:
         errors.append(
-            f"Нужно ≥3 тестовых класса (сейчас {test_class_count}): positive, negative, integration/WireMock."
+            f"Нужно ≥3 тестовых класса (сейчас {test_class_count}): "
+            "positive WireMock, negative, integration."
         )
 
     if "matchesJsonSchemaInClasspath" not in blob and "matchesJsonSchema" not in blob:
@@ -260,6 +277,77 @@ def validate_generated_project(files: dict[str, str]) -> GateResult:
         errors.append(
             "StringValuePattern в тестах — используй org.hamcrest.Matchers.equalTo."
         )
+
+    if "WireMockServer" not in blob and "WireMockBaseTest" not in blob:
+        errors.append("Нет базового класса WireMock.")
+
+    schema_files = [p for p in files if "/schemas/" in p.replace("\\", "/") and p.endswith(".json")]
+    if not schema_files:
+        errors.append("Нет JSON Schema файлов в src/test/resources/schemas/.")
+
+    errors.extend(_check_base_test_surefire_exposure(files))
+
+    for path, content in _java_files(files).items():
+        if "WireMockBaseTest" not in content and "extends WireMockBaseTest" not in content:
+            continue
+        if re.search(r"(?<!\.)\brequestSpec\b", content):
+            errors.append(
+                f"{path}: WireMock-тест использует requestSpec — нужен wireMockSpec."
+            )
+
+    return errors, warnings
+
+
+def _validate_integration_only(
+    files: dict[str, str],
+    blob: str,
+    test_class_count: int,
+) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    java_tests = _java_files(files)
+    integration_classes = [
+        p
+        for p, content in java_tests.items()
+        if _norm(p).endswith("IntegrationTest.java") and "@Test" in content
+    ]
+    if not integration_classes:
+        errors.append(
+            "Нужен минимум один *IntegrationTest.java с @Test (профиль integration-only)."
+        )
+
+    if test_class_count < 2:
+        errors.append(
+            f"Нужно ≥2 тестовых класса с @Test (сейчас {test_class_count})."
+        )
+
+    if "stubFor" in blob or "WireMockServer" in blob:
+        errors.append(
+            "Профиль integration-only: удалите WireMock (stubFor/WireMockServer)."
+        )
+
+    if re.search(r"extends\s+WireMockBaseTest", blob):
+        errors.append("Профиль integration-only: не используй WireMockBaseTest.")
+
+    errors.extend(_check_base_test_surefire_exposure(files))
+
+    schema_files = [p for p in files if "/schemas/" in p.replace("\\", "/") and p.endswith(".json")]
+    if not schema_files:
+        warnings.append(
+            "Нет JSON Schema в src/test/resources/schemas/ (опционально для integration-only)."
+        )
+
+    return errors, warnings
+
+
+def _validate_shared_post_merge(
+    files: dict[str, str],
+    blob: str,
+) -> tuple[list[str], list[str], dict[str, str]]:
+    """Client/DTO/import checks for both profiles."""
+    errors: list[str] = []
+    warnings: list[str] = []
 
     if re.search(r"RequestSpecification\s+com\.\w+\.base\.BaseTest\.requestSpec", blob):
         errors.append(
@@ -319,17 +407,6 @@ def validate_generated_project(files: dict[str, str]) -> GateResult:
             ):
                 errors.append(f"{path}: schema {schema_ref!r} не найден в проекте.")
 
-    if "WireMockServer" not in blob and "WireMockBaseTest" not in blob:
-        errors.append("Нет базового класса WireMock.")
-
-    for path, content in _java_files(files).items():
-        if "WireMockBaseTest" not in content and "extends WireMockBaseTest" not in content:
-            continue
-        if re.search(r"(?<!\.)\brequestSpec\b", content):
-            errors.append(
-                f"{path}: WireMock-тест использует requestSpec — нужен wireMockSpec."
-            )
-
     if "ConfigManager" not in blob:
         errors.append("Отсутствует ConfigManager.")
 
@@ -344,7 +421,6 @@ def validate_generated_project(files: dict[str, str]) -> GateResult:
     errors.extend(_check_request_dto_closure(files, request_dtos))
     errors.extend(_check_getbyid_call_type_mismatch(files))
     errors.extend(_check_crud_on_operation_client(files))
-    errors.extend(_check_base_test_surefire_exposure(files))
 
     for path, content in _java_files(files).items():
         if "/client/" not in path.replace("\\", "/") or not path.endswith("ApiClient.java"):
@@ -382,14 +458,92 @@ def validate_generated_project(files: dict[str, str]) -> GateResult:
     if not _has_path(files, "config.properties"):
         warnings.append("Нет src/main/resources/config.properties.")
 
-    schema_files = [p for p in files if "/schemas/" in p.replace("\\", "/") and p.endswith(".json")]
-    if not schema_files:
-        errors.append("Нет JSON Schema файлов в src/test/resources/schemas/.")
-
     if "getConnectionTimeout" in blob and "CoreConnectionPNames" not in blob:
         warnings.append(
             "Таймауты объявлены в ConfigManager, но могут не применяться к RestAssured."
         )
+
+    return errors, warnings, request_dtos
+
+
+def validate_repo_project(
+    files: dict[str, str],
+    *,
+    uses_wiremock: bool = True,
+) -> GateResult:
+    """Mode B: codegen pom + openapi.json + generated tests (no hand-written ApiClient)."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not files:
+        errors.append("Пустой набор файлов.")
+        return GateResult(passed=False, errors=errors)
+
+    pom = files.get("pom.xml", "")
+    if "openapi-generator-maven-plugin" not in pom:
+        errors.append("pom.xml: нет openapi-generator-maven-plugin (Mode B).")
+
+    if not _has_path(files, "src/main/resources/openapi/openapi.json"):
+        errors.append("Нет src/main/resources/openapi/openapi.json.")
+
+    blob = _all_content(files)
+    for label, pattern in FORBIDDEN_PATTERNS:
+        if pattern.search(blob):
+            errors.append(label)
+
+    if not _has_junit_tests(blob):
+        errors.append("Нет @Test в src/test.")
+
+    if uses_wiremock and "stubFor" not in blob:
+        warnings.append("Repo mode + contract-mocks: нет WireMock stubFor в тестах.")
+
+    if not uses_wiremock:
+        integration = [
+            p
+            for p, c in _java_files(files).items()
+            if _norm(p).endswith("IntegrationTest.java") and "@Test" in c
+        ]
+        if not integration:
+            errors.append("Нужен *IntegrationTest.java (integration-only).")
+        if "stubFor" in blob:
+            errors.append("integration-only: уберите WireMock из тестов.")
+
+    errors.extend(_check_base_test_surefire_exposure(files))
+
+    passed = len(errors) == 0
+    return GateResult(passed=passed, errors=errors, warnings=warnings)
+
+
+def validate_generated_project(
+    files: dict[str, str],
+    *,
+    uses_wiremock: bool = True,
+) -> GateResult:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    common = _validate_common(files)
+    assert common is not None
+    common_errors, common_warnings, blob, test_class_count = common
+    errors.extend(common_errors)
+    warnings.extend(common_warnings)
+    if not files:
+        return GateResult(passed=False, errors=errors, warnings=warnings)
+
+    if uses_wiremock:
+        profile_errors, profile_warnings = _validate_contract_mocks(
+            files, blob, test_class_count, _request_dto_classes(files)
+        )
+    else:
+        profile_errors, profile_warnings = _validate_integration_only(
+            files, blob, test_class_count
+        )
+    errors.extend(profile_errors)
+    warnings.extend(profile_warnings)
+
+    shared_errors, shared_warnings, _ = _validate_shared_post_merge(files, blob)
+    errors.extend(shared_errors)
+    warnings.extend(shared_warnings)
 
     passed = len(errors) == 0
     return GateResult(passed=passed, errors=errors, warnings=warnings)
