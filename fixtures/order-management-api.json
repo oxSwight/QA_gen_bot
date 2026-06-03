@@ -1,0 +1,176 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Order Management Service API",
+    "description": "Real-world API spec for testing Java automated test framework generation. Includes data validation, headers, and path variables.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://api.production-env.com/v1",
+      "description": "Default Production Server"
+    }
+  ],
+  "paths": {
+    "/orders": {
+      "post": {
+        "summary": "Create a new product order",
+        "operationId": "createOrder",
+        "parameters": [
+          {
+            "name": "X-Correlation-ID",
+            "in": "header",
+            "required": true,
+            "description": "Unique request tracking identifier for microservices",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Order created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body or missing validation parameters"
+          },
+          "401": {
+            "description": "Unauthorized - Missing or invalid security token"
+          }
+        }
+      }
+    },
+    "/orders/{orderId}": {
+      "get": {
+        "summary": "Get order details by unique ID",
+        "operationId": "getOrderById",
+        "parameters": [
+          {
+            "name": "orderId",
+            "in": "path",
+            "required": true,
+            "description": "The UUID of the order",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order details retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Order with the specified ID was not found"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "OrderRequest": {
+        "type": "object",
+        "required": [
+          "customerId",
+          "items",
+          "totalAmount"
+        ],
+        "properties": {
+          "customerId": {
+            "type": "string",
+            "format": "uuid",
+            "example": "d3b07384-d113-4956-d5f7-183059abc123"
+          },
+          "couponCode": {
+            "type": "string",
+            "example": "SUMMER2026"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrderItem"
+            }
+          },
+          "totalAmount": {
+            "type": "number",
+            "format": "double",
+            "example": 150.50
+          }
+        }
+      },
+      "OrderItem": {
+        "type": "object",
+        "required": [
+          "productId",
+          "quantity"
+        ],
+        "properties": {
+          "productId": {
+            "type": "string",
+            "example": "PROD-9982"
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "example": 2
+          }
+        }
+      },
+      "OrderResponse": {
+        "type": "object",
+        "properties": {
+          "orderId": {
+            "type": "string",
+            "format": "uuid",
+            "example": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "PROCESSING",
+              "COMPLETED",
+              "CANCELLED"
+            ],
+            "example": "PROCESSING"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-06-03T14:15:00Z"
+          },
+          "totalAmount": {
+            "type": "number",
+            "format": "double",
+            "example": 150.50
+          }
+        }
+      }
+    }
+  }
+}

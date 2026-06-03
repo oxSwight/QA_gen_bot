@@ -1,0 +1,23 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+.env.local
+*.env.bak
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# IDE
+.idea/
+*.iml
+
+# Build / local artifacts
+*.zip
+GENERATION_*.txt
+MAVEN_BUILD_REPORT.txt
+out_local/

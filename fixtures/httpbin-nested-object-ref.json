@@ -1,0 +1,62 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Httpbin Nested Object Ref Fixture",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://httpbin.org",
+      "description": "Public httpbin (integration tests excluded in Docker)"
+    }
+  ],
+  "paths": {
+    "/post": {
+      "post": {
+        "summary": "POST with nested object $ref (not array items)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PostRequest": {
+        "type": "object",
+        "required": ["slug"],
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/MetricDetails"
+          }
+        }
+      },
+      "MetricDetails": {
+        "type": "object",
+        "properties": {
+          "latencyMs": {
+            "type": "integer"
+          },
+          "region": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,103 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Httpbin Live Testing API",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://httpbin.org"
+    }
+  ],
+  "paths": {
+    "/post": {
+      "post": {
+        "operationId": "submitTestData",
+        "parameters": [
+          {
+            "name": "X-Test-Header",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestPayload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpbinResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/get": {
+      "get": {
+        "operationId": "fetchTestData",
+        "parameters": [
+          {
+            "name": "mockId",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpbinResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "TestPayload": {
+        "type": "object",
+        "required": ["environment", "featuresEnabled", "metrics"],
+        "properties": {
+          "environment": { "type": "string" },
+          "featuresEnabled": { "type": "boolean" },
+          "metrics": {
+            "$ref": "#/components/schemas/MetricDetails"
+          }
+        }
+      },
+      "MetricDetails": {
+        "type": "object",
+        "properties": {
+          "testsCount": { "type": "integer" },
+          "passRate": { "type": "number", "format": "double" }
+        }
+      },
+      "HttpbinResponse": {
+        "type": "object",
+        "properties": {
+          "url": { "type": "string" },
+          "json": { "type": "object" }
+        }
+      }
+    }
+  }
+}
