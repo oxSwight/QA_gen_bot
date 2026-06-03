@@ -158,10 +158,7 @@ async def generate_framework(
     for attempt in range(1, max_retries + 2):
         log.append(f"Попытка {attempt}: запрос к модели...")
         if on_progress:
-            await on_progress(
-                f"Генерация (LLM) {attempt}/{total_attempts}…",
-                "DTO, client, tests, schemas",
-            )
+            await on_progress("Генерация", f"{attempt}/{total_attempts}")
         extra = RETRY_PROMPT_SUFFIX if attempt > 1 else ""
 
         text = await _call_claude(
@@ -203,7 +200,7 @@ async def generate_framework(
         if attempt == max_retries + 1:
             log.append("Доп. фаза: недостающие тесты…")
             if on_progress:
-                await on_progress("Доп. фаза: тесты…", "")
+                await on_progress("Генерация", "доп. тесты")
             files = await _phase_tests_topup(
                 client,
                 model=model,
@@ -233,7 +230,7 @@ async def regenerate_with_feedback(
 ) -> tuple[dict[str, str], GateResult, list[str]]:
     log: list[str] = ["Перегенерация по feedback Maven…"]
     if on_progress:
-        await on_progress("LLM: исправление по логу Maven", "")
+        await on_progress("Исправление", "")
 
     spec_json = _spec_json_for_prompt(analysis.raw_json)
     extra = (

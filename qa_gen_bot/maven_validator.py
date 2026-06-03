@@ -216,7 +216,7 @@ async def validate_maven_project(
         ]
         logger.info("Maven validation: %s", " ".join(cmd[:8]))
         if on_progress:
-            await on_progress("Скачивание зависимостей и mvn test (первый раз может занять 2–3 мин)…")
+            await on_progress("mvn test…")
 
         started = time.monotonic()
         proc: asyncio.subprocess.Process | None = None

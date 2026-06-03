@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -33,6 +34,25 @@ class Settings:
     maven_timeout_sec: int = 300
     maven_max_retries: int = 1
     use_scaffold: bool = True
+    tester_telegram_id: int | None = None
+    tester_max_runs: int = 5
+    usage_store_path: Path = Path("data/usage.json")
+
+    def limits_enabled_for(self, user_id: int) -> bool:
+        return (
+            self.tester_telegram_id is not None
+            and user_id == self.tester_telegram_id
+        )
+
+
+def _env_optional_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return int(str(raw).strip())
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid integer for {name}={raw!r}") from exc
 
 
 def load_settings(
@@ -65,4 +85,9 @@ def load_settings(
         maven_timeout_sec=_env_int("MAVEN_TIMEOUT_SEC", 300),
         maven_max_retries=_env_int("MAVEN_MAX_RETRIES", 1),
         use_scaffold=_env_bool("USE_SCAFFOLD", True),
+        tester_telegram_id=_env_optional_int("TESTER_TELEGRAM_ID"),
+        tester_max_runs=_env_int("TESTER_MAX_RUNS", 5),
+        usage_store_path=Path(
+            os.getenv("USAGE_STORE_PATH", "data/usage.json").strip()
+        ),
     )

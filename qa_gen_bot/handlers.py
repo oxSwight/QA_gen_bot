@@ -18,6 +18,7 @@ from qa_gen_bot.pending_jobs import PendingSpecJob, clear_pending, get_pending, 
 from qa_gen_bot.pipeline import PipelineResult, run_pipeline
 from qa_gen_bot.spec_parser import SpecType, parse_spec_content
 from qa_gen_bot.status_reporter import StatusReporter
+from qa_gen_bot.usage_limits import get_quota_status, reserve_generation
 
 logger = logging.getLogger(__name__)
 
@@ -64,53 +65,22 @@ def _build_report(result: PipelineResult, analysis_title: str, ops_count: int) -
 
 
 def _caption(result: PipelineResult, analysis, *, base_url_used: str) -> str:
-    test_count = sum(c.count("@Test") for c in result.files.values())
-    mins = max(1, result.elapsed_sec // 60)
-    base = (
-        f"📦 <b>{analysis.title}</b> | com.{analysis.package_hint}\n"
-        f"Файлов: {len(result.files)} | @Test: ~{test_count} | ⏱ ~{mins} мин\n"
-        f"🌐 <code>base.url</code>: {base_url_used}\n"
-    )
-
     if result.delivery_ready:
-        maven_line = ""
-        if result.maven and result.maven.tests_run is not None:
-            maven_line = (
-                f"\n🐳 Maven: ✅ ({result.maven.tests_run} tests, "
-                f"{result.maven.duration_sec:.0f}s)"
-            )
-        return (
-            base
-            + "✅ <b>Production-ready</b> — static gate + mvn test OK"
-            + maven_line
-            + "\nРаспакуй → <code>mvn test</code>"
-            + "\n<i>Интеграционные тесты: укажите доступный API в config.properties</i>"
-        )
-
-    if result.partial_success:
+        status = "Готово: mvn test прошёл"
+    elif result.partial_success:
         if result.maven and result.maven.skipped:
-            return (
-                base
-                + "⚠️ Static OK, Maven <b>не проверен</b> (нет Docker).\n"
-                "Установи Docker Desktop для полной проверки."
-            )
-        if not result.zip_shippable:
-            return (
-                base
-                + "❌ <b>Не production-ready</b> — в ZIP только отчёты "
-                "(исходники не включены).\n"
-                "См. <code>MAVEN_BUILD_REPORT.txt</code> / <code>GENERATION_FAILED.txt</code>."
-            )
-        return (
-            base
-            + "⚠️ Static OK, но <b>mvn test не прошёл</b>.\n"
-            "См. <code>MAVEN_BUILD_REPORT.txt</code> — типично правится 5–15 мин в IDE."
-        )
+            status = "Частично: нет Docker, Maven не проверялся"
+        elif not result.zip_shippable:
+            status = "Ошибка: в ZIP только отчёты"
+        else:
+            status = "Частично: mvn test не прошёл — см. отчёт в ZIP"
+    else:
+        status = "Ошибка: см. GENERATION_FAILED.txt"
 
     return (
-        base
-        + "❌ Генерация неполная (static gate).\n"
-        "См. GENERATION_FAILED.txt"
+        f"<b>{analysis.title}</b>\n"
+        f"URL: <code>{base_url_used}</code>\n"
+        f"{status}"
     )
 
 
@@ -131,14 +101,20 @@ async def _run_and_deliver_zip(
     user_id = message.from_user.id
     user_lock = _user_locks[user_id]
     if user_lock.locked():
-        await message.answer(
-            "⏳ <b>Генерация уже выполняется</b>\n"
-            "Дождись завершения текущей — ZIP придёт в этот чат.",
-            parse_mode="HTML",
-        )
+        await message.answer("Уже идёт генерация. Дождись ZIP в этом чате.")
         return
 
     async with user_lock:
+        if settings.limits_enabled_for(user_id):
+            reserve = await reserve_generation(
+                settings.usage_store_path,
+                user_id,
+                settings.tester_max_runs,
+            )
+            if not reserve.allowed:
+                await message.answer(reserve.message or "Лимит генераций исчерпан.")
+                return
+
         async with _pipeline_sem:
             await _run_and_deliver_zip_locked(
                 message,
@@ -164,9 +140,7 @@ async def _run_and_deliver_zip_locked(
     base_url_label: str,
 ) -> None:
     status_msg = await message.answer(
-        "⚙️ <b>Генерация…</b>\n"
-        "<i>Обычно 3–6 мин. Не закрывай чат — пришлю ZIP.</i>\n"
-        f"<i>{settings.model}</i>",
+        "<b>Генерация</b>\nОбычно 3–6 мин.",
         parse_mode="HTML",
     )
 
@@ -177,11 +151,7 @@ async def _run_and_deliver_zip_locked(
             if "message is not modified" not in str(exc).lower():
                 logger.debug("Status edit skipped: %s", exc)
 
-    reporter = StatusReporter(
-        edit_status,
-        heartbeat_sec=20.0,
-        model_label=settings.model,
-    )
+    reporter = StatusReporter(edit_status, heartbeat_sec=20.0)
 
     try:
         result = await run_pipeline(
@@ -200,9 +170,7 @@ async def _run_and_deliver_zip_locked(
                 else "ZIP отправлен, но не production-ready."
             )
             await message.answer(
-                f"⚠️ <b>Не production-ready</b> — {zip_note} "
-                "См. <code>GENERATION_REPORT.txt</code> / <code>MAVEN_BUILD_REPORT.txt</code>.",
-                parse_mode="HTML",
+                f"Не готово к продакшену. {zip_note} Подробности в ZIP.",
             )
 
         report_name = (
@@ -213,7 +181,7 @@ async def _run_and_deliver_zip_locked(
         report_body = _build_report(result, analysis.title, len(analysis.operations))
 
         if not result.files:
-            await message.answer("❌ Не удалось сгенерировать файлы. Попробуй ещё раз.")
+            await message.answer("Не удалось сгенерировать файлы. Попробуй снова.")
             return
 
         maven_report = None
@@ -238,20 +206,12 @@ async def _run_and_deliver_zip_locked(
             parse_mode="HTML",
         )
 
-        if result.delivery_ready:
-            final = "✅ ZIP отправлен"
-        elif result.zip_shippable:
-            final = "⚠️ ZIP отправлен (см. caption)"
-        else:
-            final = "⚠️ Отчёт в ZIP (исходники не включены — Maven/static gate FAIL)"
-        await edit_status(
-            f"{final}\n⏱ {reporter.elapsed_sec // 60}:{reporter.elapsed_sec % 60:02d}"
-        )
+        await edit_status("Готово")
 
     except Exception as exc:
         logger.exception("Pipeline failed")
-        await message.answer(f"❌ Ошибка: {exc}")
-        await edit_status(f"❌ Ошибка: {exc}")
+        await message.answer(f"Ошибка: {exc}")
+        await edit_status("Ошибка")
 
     finally:
         try:
@@ -261,22 +221,27 @@ async def _run_and_deliver_zip_locked(
 
 
 def register_handlers(dp: Dispatcher, bot: Bot, client: AsyncAnthropic, settings: Settings) -> None:
-    maven_status = "вкл" if settings.maven_validation_enabled else "выкл"
-
     @dp.message(Command("start"))
     async def cmd_start(message: types.Message) -> None:
-        await message.answer(
-            "👋 <b>QA Gen Bot</b> — OpenAPI → Java тестовый фреймворк.\n\n"
-            "📎 Отправь <b>.json</b> (OpenAPI 3.x / Swagger 2.0).\n"
-            "Затем бот спросит <b>base URL</b> API для интеграционных тестов.\n"
-            "• Пришли URL, например <code>https://dev.mycompany.com/v1</code>\n"
-            "• Или <code>/skip</code> — оставить URL из JSON\n\n"
-            "❌ Postman — экспортируй OpenAPI из Postman.\n\n"
-            "⏱ Обычно <b>3–6 минут</b> после URL.\n"
-            f"Проверка: static gate + mvn test в Docker ({maven_status}).\n\n"
-            "/cancel — отменить ожидание URL.",
-            parse_mode="HTML",
-        )
+        lines = [
+            "<b>QA Gen Bot</b>",
+            "OpenAPI (.json) → Java Maven проект с тестами.",
+            "",
+            "1. Отправь .json",
+            "2. Укажи base URL или <code>/skip</code>",
+            "",
+            "Обычно 3–6 мин. /cancel — отмена",
+        ]
+        if message.from_user and settings.limits_enabled_for(message.from_user.id):
+            status = get_quota_status(
+                settings.usage_store_path,
+                message.from_user.id,
+                settings.tester_max_runs,
+            )
+            lines.append(
+                f"\nТестовый доступ: осталось {status.remaining}/{status.max_runs} генераций."
+            )
+        await message.answer("\n".join(lines), parse_mode="HTML")
 
     @dp.message(Command("help"))
     async def cmd_help(message: types.Message) -> None:
@@ -294,7 +259,7 @@ def register_handlers(dp: Dispatcher, bot: Bot, client: AsyncAnthropic, settings
     async def handle_document(message: types.Message) -> None:
         doc = message.document
         if not doc.file_name or not doc.file_name.lower().endswith(".json"):
-            await message.answer("❌ Нужен файл с расширением <b>.json</b>", parse_mode="HTML")
+            await message.answer("Нужен файл .json")
             return
 
         try:
@@ -304,8 +269,7 @@ def register_handlers(dp: Dispatcher, bot: Bot, client: AsyncAnthropic, settings
 
             if len(raw_bytes) > settings.max_spec_chars:
                 await message.answer(
-                    f"❌ Файл слишком большой ({len(raw_bytes)} байт). "
-                    f"Лимит: {settings.max_spec_chars}."
+                    f"Файл слишком большой. Лимит: {settings.max_spec_chars} байт."
                 )
                 return
 
@@ -315,8 +279,8 @@ def register_handlers(dp: Dispatcher, bot: Bot, client: AsyncAnthropic, settings
             if analysis.error:
                 hint = ""
                 if analysis.spec_type == SpecType.POSTMAN:
-                    hint = "\n\n💡 Postman → Export → OpenAPI 3.0"
-                await message.answer(f"❌ {analysis.error}{hint}")
+                    hint = "\nЭкспортируй OpenAPI из Postman."
+                await message.answer(f"{analysis.error}{hint}")
                 return
 
             from_spec = analysis.base_url or "https://api.example.com/v1"
@@ -329,21 +293,27 @@ def register_handlers(dp: Dispatcher, bot: Bot, client: AsyncAnthropic, settings
                 ),
             )
 
+            quota_line = ""
+            if message.from_user and settings.limits_enabled_for(message.from_user.id):
+                status = get_quota_status(
+                    settings.usage_store_path,
+                    message.from_user.id,
+                    settings.tester_max_runs,
+                )
+                quota_line = (
+                    f"\nГенераций осталось: {status.remaining}/{status.max_runs}."
+                )
+
             await message.answer(
-                "✅ <b>OpenAPI принят</b>\n"
-                f"• {analysis.title} · {len(analysis.operations)} операций\n"
-                f"• URL в JSON: <code>{from_spec}</code>\n\n"
-                "🌐 Пришли <b>base URL</b> для <code>config.properties</code> "
-                "(интеграционные тесты):\n"
-                "• Ваш стенд, например <code>https://dev.example.com/v1</code>\n"
-                "• <code>/skip</code> — оставить URL из JSON\n"
-                "/cancel — отмена",
+                f"Принято: <b>{analysis.title}</b> ({len(analysis.operations)} ops)\n\n"
+                f"Пришли base URL или <code>/skip</code>\n"
+                f"В спецификации: <code>{from_spec}</code>{quota_line}",
                 parse_mode="HTML",
             )
 
         except Exception as exc:
             logger.exception("Spec intake failed")
-            await message.answer(f"❌ Ошибка: {exc}")
+            await message.answer(f"Ошибка: {exc}")
 
     @dp.message(F.text)
     async def handle_base_url_reply(message: types.Message) -> None:
@@ -368,17 +338,12 @@ def register_handlers(dp: Dispatcher, bot: Bot, client: AsyncAnthropic, settings
             normalized, err = normalize_base_url(text)
             if err:
                 await message.answer(
-                    f"❌ {err}\n\n"
-                    "Пример: <code>https://dev.mycompany.com/v1</code> или <code>/skip</code>",
-                    parse_mode="HTML",
+                    f"{err}\nПример: https://api.example.com/v1 или /skip",
                 )
                 return
             base_url_override = normalized
             base_url_label = normalized
-            await message.answer(
-                f"✅ base.url: <code>{base_url_label}</code>",
-                parse_mode="HTML",
-            )
+            await message.answer(f"URL: {base_url_label}")
 
         clear_pending(message.from_user.id)
 

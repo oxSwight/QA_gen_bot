@@ -107,10 +107,7 @@ async def run_pipeline(
             await reporter.set_step(step, detail)
 
     if reporter:
-        await progress(
-            "1/5 Проверка OpenAPI",
-            f"{analysis.title} · {len(analysis.operations)} ops",
-        )
+        await progress("Спека", analysis.title)
 
     async def _generate():
         return await generate_framework(
@@ -133,12 +130,12 @@ async def run_pipeline(
         ]
         log.extend(gen_log)
         if reporter:
-            await progress("2/5 Генерация", "пропущена (кэш)")
+            await progress("Генерация", "из кэша")
     else:
         if reporter:
             llm_files, gen_status, gen_log = await reporter.run_with_heartbeat(
-                "2/5 Генерация (LLM)",
-                "DTO, client, tests, schemas",
+                "Генерация",
+                "",
                 _generate(),
             )
         else:
@@ -152,7 +149,7 @@ async def run_pipeline(
             errors=["Недостаточно файлов от модели — нет минимального набора Java-тестов."],
         )
         log.append("Стоп: генерация не дала минимальный batch (LLM batch check).")
-        await progress("Стоп", "Генерация не удалась")
+        await progress("Ошибка", "генерация")
         return PipelineResult(
             files=llm_files,
             static_gate=fail_gate,
@@ -164,13 +161,13 @@ async def run_pipeline(
 
     llm_files_raw = dict(llm_files)
 
-    await progress("3/5 Сборка проекта", "Scaffold + auto-fix")
+    await progress("Сборка", "")
     files, gate = _finalize_files(
         llm_files, scaffold, settings.use_scaffold, base_package, log
     )
 
     if not gate.passed:
-        await progress("Стоп", "Static gate не пройден")
+        await progress("Ошибка", "проверка кода")
         return PipelineResult(
             files=files,
             static_gate=gate,
@@ -204,8 +201,8 @@ async def run_pipeline(
         )
         if reporter:
             return await reporter.run_with_heartbeat(
-                "4/5 Maven test",
-                "Docker mvn test",
+                "Maven",
+                "mvn test",
                 coro,
             )
         return await coro
@@ -214,7 +211,7 @@ async def run_pipeline(
     log.append(maven.summary())
 
     if maven.passed:
-        await progress("5/5 Готово", maven.summary())
+        await progress("Готово", "")
         return PipelineResult(
             files=files,
             static_gate=gate,
@@ -225,7 +222,7 @@ async def run_pipeline(
         )
 
     if maven.skipped:
-        await progress("5/5", maven.skip_reason or "Docker недоступен")
+        await progress("Готово", "Maven пропущен")
         return PipelineResult(
             files=files,
             static_gate=gate,
@@ -239,7 +236,7 @@ async def run_pipeline(
     autofix = autofix_from_maven_log(files, maven.log_tail, base_package)
     if autofix.applied:
         log.extend(f"Maven auto-fix: {a}" for a in autofix.applied)
-        await progress("4/5 Maven retry", "Локальный auto-fix (без API)")
+        await progress("Maven", "повтор")
         files, gate = _finalize_files(
             autofix.files,
             scaffold,
@@ -250,7 +247,7 @@ async def run_pipeline(
         maven = await _maven(files)
         log.append(f"После auto-fix: {maven.summary()}")
         if maven.passed:
-            await progress("5/5 Готово", maven.summary())
+            await progress("Готово", "")
             return PipelineResult(
                 files=files,
                 static_gate=gate,
@@ -263,10 +260,7 @@ async def run_pipeline(
     from qa_gen_bot.prompts import MAVEN_RETRY_HINT
 
     for attempt in range(1, settings.maven_max_retries + 1):
-        await progress(
-            "5/5 Исправление",
-            f"Maven FAIL → LLM regen {attempt}/{settings.maven_max_retries}",
-        )
+        await progress("Исправление", f"попытка {attempt}")
 
         async def _regen():
             return await regenerate_with_feedback(
@@ -282,8 +276,8 @@ async def run_pipeline(
 
         if reporter:
             llm_files, _, gen_log = await reporter.run_with_heartbeat(
-                "5/5 Исправление",
-                "LLM + scaffold",
+                "Исправление",
+                "",
                 _regen(),
             )
         else:
@@ -299,7 +293,7 @@ async def run_pipeline(
         maven = await _maven(files)
         log.append(f"Maven retry: {maven.summary()}")
         if maven.passed:
-            await progress("5/5 Готово", maven.summary())
+            await progress("Готово", "")
             break
 
     return PipelineResult(

@@ -1,4 +1,4 @@
-# Secrets — never commit
+
 .env
 .env.*
 !.env.example
@@ -21,3 +21,4 @@ __pycache__/
 GENERATION_*.txt
 MAVEN_BUILD_REPORT.txt
 out_local/
+data/

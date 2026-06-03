@@ -42,14 +42,9 @@ class StatusReporter:
 
     async def _push(self) -> None:
         elapsed = self.elapsed_sec
-        lines = [
-            f"⏳ <b>{self._step}</b>  ({elapsed // 60}:{elapsed % 60:02d})",
-        ]
+        lines = [f"<b>{self._step}</b> · {elapsed // 60}:{elapsed % 60:02d}"]
         if self._detail:
             lines.append(self._detail)
-        lines.append("<i>Обычно 3–6 мин. Не закрывай чат — пришлю ZIP.</i>")
-        if self._model_label:
-            lines.append(f"<i>{self._model_label}</i>")
         await self._on_update("\n".join(lines))
 
     async def _heartbeat_loop(self) -> None:
