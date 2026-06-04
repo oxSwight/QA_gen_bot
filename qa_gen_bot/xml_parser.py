@@ -1,4 +1,4 @@
-"""Parse LLM XML output into a file map."""
+"""Parse XML file blocks from the generation API into a file map."""
 from __future__ import annotations
 
 import re
@@ -19,7 +19,7 @@ MANIFEST_TEST_RE = re.compile(
 class ParseResult:
     files: dict[str, str]
     test_classes: list[str]
-    llm_error: str | None
+    refusal_text: str | None
     raw_text: str
 
 
@@ -37,7 +37,7 @@ def _sanitize_path(path: str) -> str | None:
     return p
 
 
-def parse_llm_output(text: str) -> ParseResult:
+def parse_generation_output(text: str) -> ParseResult:
     files: dict[str, str] = {}
     for path, content in FILE_TAG_RE.findall(text):
         safe = _sanitize_path(path)
@@ -45,14 +45,14 @@ def parse_llm_output(text: str) -> ParseResult:
             files[safe] = content.strip()
 
     error_match = ERROR_TAG_RE.search(text)
-    llm_error = error_match.group(1).strip() if error_match else None
+    refusal_text = error_match.group(1).strip() if error_match else None
 
     test_classes = [c.strip() for c in MANIFEST_TEST_RE.findall(text)]
 
     return ParseResult(
         files=files,
         test_classes=test_classes,
-        llm_error=llm_error,
+        refusal_text=refusal_text,
         raw_text=text,
     )
 

@@ -1,4 +1,4 @@
-"""Deterministic fixes before/after Maven (no LLM)."""
+"""Deterministic fixes before/after Maven (no API calls)."""
 from __future__ import annotations
 
 import re
@@ -101,7 +101,7 @@ def _insert_after_package(content: str, block: str) -> str:
 
 
 def remove_broken_wiremock_tests(files: dict[str, str]) -> FixResult:
-    """Drop LLM *WireMock* tests that still confuse matchers (scaffold 405 remains)."""
+    """Drop generated *WireMock* tests that confuse matchers (scaffold 405 remains)."""
     out = dict(files)
     applied: list[str] = []
     for path, content in list(files.items()):
@@ -282,6 +282,8 @@ def autofix_from_maven_log(
     files: dict[str, str],
     log: str,
     base_package: str,
+    *,
+    uses_wiremock: bool = True,
 ) -> FixResult:
     applied: list[str] = []
     current = files
@@ -321,17 +323,18 @@ def autofix_from_maven_log(
         fixes.append(lambda f: fix_base_class_extends(f, base_package))
     if "requestSpec" in log or "cyclic inheritance" in log:
         fixes.append(lambda f: fix_request_spec_reference(f, base_package))
-    if "symbol:   variable requestSpec" in log or "variable requestSpec" in log:
-        fixes.append(lambda f: fix_wiremock_request_spec(f, base_package))
-    if "StringValuePattern" in log or "WireMock" in log:
-        fixes.extend(
-            [
-                lambda f: fix_wiremock_test_base_class(f, base_package),
-                lambda f: fix_wiremock_request_spec(f, base_package),
-                lambda f: fix_wiremock_hamcrest_import_clash(f),
-                lambda f: remove_broken_wiremock_tests(f),
-            ]
-        )
+    if uses_wiremock:
+        if "symbol:   variable requestSpec" in log or "variable requestSpec" in log:
+            fixes.append(lambda f: fix_wiremock_request_spec(f, base_package))
+        if "StringValuePattern" in log or "WireMock" in log:
+            fixes.extend(
+                [
+                    lambda f: fix_wiremock_test_base_class(f, base_package),
+                    lambda f: fix_wiremock_request_spec(f, base_package),
+                    lambda f: fix_wiremock_hamcrest_import_clash(f),
+                    lambda f: remove_broken_wiremock_tests(f),
+                ]
+            )
     if "io.restassured" in log:
         fixes.append(move_restassured_clients_to_test)
 
@@ -508,7 +511,7 @@ def _pick_canonical_request_dto(
 
 
 def sync_client_dto_type(files: dict[str, str], base_package: str) -> FixResult:
-    """Align scaffold ApiClient create/update types with LLM dto/request classes."""
+    """Align scaffold ApiClient create/update types with generated dto/request classes."""
     out = dict(files)
     applied: list[str] = []
     dtos = _discover_request_dto_classes(out)
@@ -567,8 +570,54 @@ _TEST_DTO_BY_CLASS = (
 )
 
 
+def _client_update_uses_path_id(files: dict[str, str]) -> bool:
+    for path, content in files.items():
+        p = _norm(path)
+        if "/client/" not in p or not p.endswith("ApiClient.java"):
+            continue
+        if re.search(r'\.put\s*\(\s*BASE\s*\+\s*"(/\{[^"]+\})"', content):
+            return True
+    return False
+
+
+def _client_update_is_body_only(files: dict[str, str]) -> bool:
+    for path, content in files.items():
+        p = _norm(path)
+        if "/client/" not in p or not p.endswith("ApiClient.java"):
+            continue
+        if re.search(r"public\s+Response\s+update\s*\(\s*\w+InputDto\s+body\s*\)", content):
+            return True
+    return False
+
+
+def fix_client_update_calls_for_body_only(files: dict[str, str]) -> FixResult:
+    """client.update(id, dto) -> client.update(dto) when scaffold PUT is on /pet only."""
+    if not _client_update_is_body_only(files):
+        return FixResult(files=dict(files), applied=[])
+    out = dict(files)
+    applied: list[str] = []
+    patterns = [
+        (r"client\.update\(\s*\w+\.getId\(\)\s*,\s*(\w+)\s*\)", r"client.update(\1)"),
+        (r"client\.update\(\s*\d+L?\s*,\s*(\w+)\s*\)", r"client.update(\1)"),
+        (r"client\.update\(\s*\w+Id\s*,\s*(\w+)\s*\)", r"client.update(\1)"),
+    ]
+    for path, content in list(out.items()):
+        p = _norm(path)
+        if not p.endswith("Test.java"):
+            continue
+        original = content
+        for pattern, repl in patterns:
+            content = re.sub(pattern, repl, content)
+        if content != original:
+            out[path] = content
+            applied.append(f"update(body) calls in {p}")
+    return FixResult(files=out, applied=applied)
+
+
 def fix_single_arg_client_update(files: dict[str, str]) -> FixResult:
-    """client.update(dto) -> client.update(id, dto) when id is set on builder."""
+    """client.update(dto) -> client.update(id, dto) only when client PUT uses path id."""
+    if not _client_update_uses_path_id(files):
+        return FixResult(files=dict(files), applied=[])
     out = dict(files)
     applied: list[str] = []
 
@@ -694,7 +743,7 @@ def _is_main_input_dto(name: str) -> bool:
 
 def sync_component_dto_suffix(files: dict[str, str]) -> FixResult:
     """
-    Тесты/LLM ожидают OrderItemDto, scaffold мог создать OrderItem.
+    Тесты ожидают OrderItemDto, scaffold мог создать OrderItem.
     Переименовывает класс и ссылки: OrderItem -> OrderItemDto.
     """
     out = dict(files)
@@ -869,12 +918,15 @@ def apply_all_structure_fixes(
     files: dict[str, str],
     base_package: str,
     scaffold: dict[str, str] | None = None,
+    *,
+    uses_wiremock: bool = True,
 ) -> FixResult:
     applied: list[str] = []
     current = files
-    for fixer in (
+    fixers: list = [
         lambda f: normalize_junit_and_base_imports(f, base_package),
         move_response_dtos_to_main,
+        fix_client_update_calls_for_body_only,
         fix_single_arg_client_update,
         lambda f: align_packages_to_path(f, base_package),
         lambda f: fix_base_class_extends(f, base_package),
@@ -886,13 +938,23 @@ def apply_all_structure_fixes(
         fix_getbyid_string_literal_calls,
         lambda f: sync_component_dto_suffix(f),
         lambda f: rename_base_tests_to_integration(f, base_package),
-        lambda f: fix_wiremock_test_base_class(f, base_package),
-        lambda f: fix_wiremock_request_spec(f, base_package),
-        lambda f: fix_request_spec_reference(f, base_package),
-        lambda f: fix_wiremock_hamcrest_import_clash(f),
-        lambda f: remove_broken_wiremock_tests(f),
-        lambda f: move_restassured_clients_to_test(f),
-    ):
+    ]
+    if uses_wiremock:
+        fixers.extend(
+            [
+                lambda f: fix_wiremock_test_base_class(f, base_package),
+                lambda f: fix_wiremock_request_spec(f, base_package),
+                lambda f: fix_wiremock_hamcrest_import_clash(f),
+                lambda f: remove_broken_wiremock_tests(f),
+            ]
+        )
+    fixers.extend(
+        [
+            lambda f: fix_request_spec_reference(f, base_package),
+            lambda f: move_restassured_clients_to_test(f),
+        ]
+    )
+    for fixer in fixers:
         result = fixer(current)
         current = result.files
         applied.extend(result.applied)

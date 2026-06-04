@@ -22,3 +22,4 @@ GENERATION_*.txt
 MAVEN_BUILD_REPORT.txt
 out_local/
 data/
+config/bot.json

@@ -5,7 +5,7 @@ Examples (from repo root, venv active):
 
   python run_local.py --spec fixtures/httpbin-live-testing-api.json --base-url https://httpbin.org
   python run_local.py --spec fixtures/jsonplaceholder-api.json --base-url https://jsonplaceholder.typicode.com
-  python run_local.py --spec fixtures/httpbin-live-testing-api.json --use-cache --cache fixtures/httpbin-llm-cache.json --cheap
+  python run_local.py --spec fixtures/httpbin-live-testing-api.json --use-cache --cache fixtures/httpbin-gen-cache.json --cheap
   python run_local.py --spec fixtures/httpbin-nested-object-ref.json --scaffold-only
   python run_local.py --maven-only --project-dir path/to/unpacked-zip
   python -m pytest tests/ -q
@@ -29,10 +29,17 @@ load_dotenv(_ROOT / ".env")
 from anthropic import AsyncAnthropic
 
 from qa_gen_bot.base_url import normalize_base_url
-from qa_gen_bot.config import Settings, load_settings
-from qa_gen_bot.llm_cache import load_llm_cache, save_llm_cache
+from qa_gen_bot.config import (
+    PROFILE_CONTRACT_MOCKS,
+    PROFILE_INTEGRATION_ONLY,
+    Settings,
+    load_settings,
+)
+from qa_gen_bot.gen_cache import load_gen_cache, save_gen_cache
 from qa_gen_bot.maven_validator import validate_maven_project
-from qa_gen_bot.pipeline import PipelineResult, _finalize_files, run_pipeline
+from qa_gen_bot.core.models import GenerationRequest, GenerationResult
+from qa_gen_bot.core.runner import run_generation
+from qa_gen_bot.pipeline import _finalize_files
 from qa_gen_bot.reporting import write_project_zip
 from qa_gen_bot.scaffold import build_scaffold
 from qa_gen_bot.spec_parser import parse_spec_content
@@ -40,7 +47,7 @@ from qa_gen_bot.spec_parser import parse_spec_content
 logger = logging.getLogger(__name__)
 DEFAULT_SPEC = _ROOT / "fixtures" / "jsonplaceholder-api.json"
 DEFAULT_OUT = _ROOT / "out_local"
-DEFAULT_CACHE = DEFAULT_OUT / "llm_cache.json"
+DEFAULT_CACHE = DEFAULT_OUT / "gen_cache.json"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -65,17 +72,17 @@ def _parse_args() -> argparse.Namespace:
         "--cache",
         type=Path,
         default=DEFAULT_CACHE,
-        help="Путь к llm_cache.json",
+        help="Путь к файлу кэша генерации",
     )
     p.add_argument(
         "--save-cache",
         action="store_true",
-        help="После Claude сохранить сырой LLM output в --cache",
+        help="После прогона сохранить сырой ответ API в --cache",
     )
     p.add_argument(
         "--use-cache",
         action="store_true",
-        help="Не вызывать Claude — взять файлы из --cache",
+        help="Не вызывать API — взять файлы из --cache",
     )
     p.add_argument(
         "--scaffold-only",
@@ -108,6 +115,18 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         help="Папка с pom.xml (для --maven-only)",
     )
+    p.add_argument(
+        "--generation-profile",
+        choices=[PROFILE_CONTRACT_MOCKS, PROFILE_INTEGRATION_ONLY],
+        default=None,
+        help="contract-mocks (WireMock) или integration-only (live API tests)",
+    )
+    p.add_argument(
+        "--mode",
+        choices=["quick_start", "repo"],
+        default="quick_start",
+        help="quick_start (ZIP Mode A) или repo (openapi-generator Mode B)",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
@@ -115,6 +134,8 @@ def _parse_args() -> argparse.Namespace:
 def _settings_for_run(args: argparse.Namespace) -> Settings:
     require_api = not (args.use_cache or args.scaffold_only or args.maven_only)
     base = load_settings(require_telegram=False, require_anthropic=require_api)
+    if args.generation_profile:
+        base = replace(base, generation_profile=args.generation_profile)
     if args.cheap:
         base = replace(base, max_retries=0, maven_max_retries=0)
     if args.no_maven:
@@ -143,7 +164,7 @@ def _files_from_dir(project_dir: Path) -> dict[str, str]:
 
 
 def _print_result(
-    result: PipelineResult,
+    result: GenerationResult,
     zip_path: Path | None,
     *,
     scaffold_only: bool = False,
@@ -151,9 +172,9 @@ def _print_result(
     print()
     print("=" * 60)
     if scaffold_only:
-        print("OK  scaffold-only — только шаблоны (LLM не вызывался)")
+        print("OK  scaffold-only — только шаблоны (API не вызывался)")
         print(
-            "    Static gate сейчас падает — это нормально: нет DTO, тестов и schemas от Claude."
+            "    Static gate сейчас падает — это нормально: нет DTO, тестов и schemas из API."
         )
     elif result.delivery_ready:
         print("OK  Production-ready (static + mvn test)")
@@ -167,7 +188,7 @@ def _print_result(
     print()
     if result.static_gate.errors:
         label = (
-            "Ожидаемые ошибки gate (нет LLM-файлов):"
+            "Ожидаемые ошибки gate (нет доп. файлов):"
             if scaffold_only
             else "Static errors:"
         )
@@ -182,7 +203,7 @@ def _print_result(
         print()
         print("Дальше:")
         print("  python -m pytest tests/ -q          # fixers/gate, $0")
-        print("  python run_local.py --save-cache     # 1× Claude + кэш")
+        print("  python run_local.py --save-cache     # 1× API + кэш")
         print("  python run_local.py --use-cache      # fixers+Maven, $0")
     if result.maven and not result.maven.passed:
         print(result.maven.summary())
@@ -208,7 +229,7 @@ async def _run_maven_only(args: argparse.Namespace) -> int:
         docker_image=settings.maven_docker_image,
         timeout_sec=settings.maven_timeout_sec,
     )
-    result = PipelineResult(
+    result = GenerationResult(
         files=files,
         static_gate=GateResult(passed=True),
         maven=maven,
@@ -221,12 +242,21 @@ async def _run_maven_only(args: argparse.Namespace) -> int:
 async def _run_scaffold_only(
     spec_content: str, analysis, settings: Settings, out_dir: Path
 ) -> int:
-    scaffold = build_scaffold(analysis) if settings.use_scaffold else {}
+    scaffold = (
+        build_scaffold(analysis, uses_wiremock=settings.uses_wiremock)
+        if settings.use_scaffold
+        else {}
+    )
     base_package = f"com.{analysis.package_hint}"
-    log: list[str] = ["scaffold-only: LLM пропущен"]
+    log: list[str] = ["scaffold-only: API пропущен"]
     t0 = time.monotonic()
     files, gate = _finalize_files(
-        {}, scaffold, settings.use_scaffold, base_package, log
+        {},
+        scaffold,
+        settings.use_scaffold,
+        base_package,
+        log,
+        uses_wiremock=settings.uses_wiremock,
     )
     maven = None
     if settings.maven_validation_enabled:
@@ -236,7 +266,7 @@ async def _run_scaffold_only(
             timeout_sec=settings.maven_timeout_sec,
         )
         log.append(maven.summary())
-    result = PipelineResult(
+    result = GenerationResult(
         files=files,
         static_gate=gate,
         maven=maven,
@@ -249,6 +279,7 @@ async def _run_scaffold_only(
         package_hint=analysis.package_hint,
         analysis_title=analysis.title,
         ops_count=len(analysis.operations),
+        profile_label=settings.generation_profile,
     )
     return _print_result(result, zip_path, scaffold_only=True)
 
@@ -259,18 +290,18 @@ async def _run_full(args: argparse.Namespace) -> int:
     out_dir = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    llm_preloaded = None
+    files_preloaded = None
     if args.use_cache:
         if not args.cache.is_file():
             raise SystemExit(
                 f"Нет кэша {args.cache}. Сначала: python run_local.py --save-cache"
             )
-        llm_preloaded = load_llm_cache(
+        files_preloaded = load_gen_cache(
             args.cache,
             expected_package_hint=analysis.package_hint,
         )
         print(
-            f"Cache: {len(llm_preloaded)} files from {args.cache} "
+            f"Cache: {len(files_preloaded)} files from {args.cache} "
             f"(package com.{analysis.package_hint})"
         )
 
@@ -287,22 +318,24 @@ async def _run_full(args: argparse.Namespace) -> int:
             raise SystemExit(f"base-url: {err}")
         print(f"base.url override: {base_url_override}")
 
-    result = await run_pipeline(
-        client,
-        analysis,
-        spec_content,
-        settings,
-        llm_files_preloaded=llm_preloaded,
-        llm_cache_path=str(args.cache) if llm_preloaded else None,
+    request = GenerationRequest(
+        analysis=analysis,
+        spec_content=spec_content,
+        generation_profile=settings.generation_profile,
         base_url_override=base_url_override,
+        mode=args.mode,
+        files_preloaded=files_preloaded,
+        cache_path=str(args.cache) if files_preloaded else None,
     )
-    result = PipelineResult(
+    result = await run_generation(client, request, settings)
+    result = GenerationResult(
         files=result.files,
         static_gate=result.static_gate,
         maven=result.maven,
         log=result.log,
         elapsed_sec=int(time.monotonic() - t0),
-        llm_files_raw=result.llm_files_raw,
+        generated_files_raw=result.generated_files_raw,
+        mode=result.mode,
     )
 
     zip_path = write_project_zip(
@@ -311,20 +344,21 @@ async def _run_full(args: argparse.Namespace) -> int:
         package_hint=analysis.package_hint,
         analysis_title=analysis.title,
         ops_count=len(analysis.operations),
+        profile_label=settings.generation_profile,
     )
 
     if args.save_cache and not args.use_cache:
-        raw = result.llm_files_raw
+        raw = result.generated_files_raw
         if raw:
-            save_llm_cache(
+            save_gen_cache(
                 args.cache,
                 spec_path=str(args.spec),
                 package_hint=analysis.package_hint,
                 files=raw,
             )
-            print(f"Saved LLM cache ({len(raw)} files): {args.cache}")
+            print(f"Saved generation cache ({len(raw)} files): {args.cache}")
         else:
-            print("WARN: --save-cache: нет llm_files_raw (обновите qa_gen_bot/pipeline.py)")
+            print("WARN: --save-cache: нет generated_files_raw")
 
     return _print_result(result, zip_path)
 

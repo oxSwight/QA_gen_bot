@@ -1,8 +1,8 @@
 # QA Gen Bot
 
-**OpenAPI 3.x / Swagger 2.0 → production-checked Java Maven API test frameworks**, delivered as a ZIP via Telegram or local CLI.
+**OpenAPI 3.x / Swagger 2.0 → Java Maven API test frameworks**, delivered as a ZIP via Telegram or local CLI.
 
-The engine combines a **deterministic scaffold** (build files, base tests, API client, request DTOs) with **model-generated** response DTOs, JSON Schema assets, and JUnit 5 tests. Every deliverable passes a **static quality gate** and **`mvn test` inside Docker** before it is marked production-ready.
+A **deterministic scaffold** (build files, base tests, API client, request DTOs) is merged with **API-generated** response DTOs, JSON Schema assets, and JUnit 5 tests. Each deliverable passes a **static quality gate** and **`mvn test` in Docker** before release.
 
 ---
 
@@ -26,11 +26,11 @@ The engine combines a **deterministic scaffold** (build files, base tests, API c
                   └────────┬───────┘
                            ▼
                   ┌────────────────┐
-                  │   generator    │  LLM: tests, response DTOs, schemas
+                  │   generator    │  tests, response DTOs, schemas
                   └────────┬───────┘
                            ▼
                   ┌────────────────┐
-                  │ merge +        │  strip LLM overrides of protected paths
+                  │ merge +        │  protected paths not overwritten
                   │ structure_fixer│  imports, DTO suffix, WireMock/Hamcrest
                   └────────┬───────┘
                            ▼
@@ -44,19 +44,49 @@ The engine combines a **deterministic scaffold** (build files, base tests, API c
                            ▼
               ┌────────────┴────────────┐
               ▼                         ▼
-     BUILD SUCCESS + tests>0      FAILURE → LLM retry / reports-only ZIP
+     BUILD SUCCESS + tests>0      FAILURE → retry / reports-only ZIP
               ▼
      *-qa-framework.zip + GENERATION_REPORT.txt
 ```
 
-**Deterministic vs probabilistic boundary**
+**Deterministic vs generated boundary**
 
 | Layer | Source | Examples |
 |-------|--------|----------|
 | Scaffold (always) | Templates + OpenAPI graph | `pom.xml`, `PostApiClient.submitTestData()`, nested `MetricDetailsDto` |
-| LLM zone | Anthropic API | `*IntegrationTest`, `*WireMockTest`, response DTOs, `schemas/*.json` |
+| Generated zone | Remote API | `*IntegrationTest`, `*WireMockTest`, response DTOs, `schemas/*.json` |
 
-Protected paths cannot be overwritten by the model (`pom.xml`, `client/`, `dto/request/`, base test classes).
+Protected paths cannot be overwritten (`pom.xml`, `client/`, `dto/request/`, base test classes).
+
+---
+
+## Generation profiles (Mode A)
+
+Set `GENERATION_PROFILE` in `.env` or pass `--generation-profile` to `run_local.py`:
+
+| Profile | Value | Output |
+|---------|--------|--------|
+| **Contract + mocks** (default) | `contract-mocks` | WireMock tests, JSON Schema, `mvn test` (wiremock Surefire profile) |
+| **Integration only** | `integration-only` | No WireMock scaffold; `*IntegrationTest` against `base.url`; `mvn test` runs live slice |
+
+Invalid profile values fail at startup (fail-fast).
+
+In **Telegram**, the user picks profile and mode via inline buttons after uploading `.json`.
+
+Optional **`config/bot.json`** (see `config/bot.example.json`) overrides defaults; `.env` wins for `GENERATION_PROFILE` and `TESTER_MAX_RUNS`.
+
+| Mode | Value | Output |
+|------|--------|--------|
+| **Quick Start (A)** | `quick_start` | ZIP with scaffold + client in `src/test` |
+| **Repo (B)** | `repo` | `openapi-generator` → `target/generated-sources` + tests |
+
+CLI: `python run_local.py --mode repo --generation-profile integration-only`
+
+**Telegram commands:** `/start`, `/help`, `/status` (квота + черновик), `/cancel`.
+
+**Observability:** each run logs a JSON `run_summary` line (`mode`, `profile`, `segment`, `delivery_ready`).
+
+**CI:** GitHub Actions workflow `.github/workflows/ci.yml` runs `pytest` on push/PR.
 
 ---
 
@@ -66,8 +96,8 @@ Protected paths cannot be overwritten by the model (`pom.xml`, `client/`, `dto/r
 - **Transitive request DTO closure** for nested `$ref` in OpenAPI `components.schemas`.
 - **Static gate** before Maven: forbidden stacks (TestNG, Allure), JSON Schema usage, `getById` type checks, Surefire-safe test naming.
 - **Docker-isolated Maven** with Surefire profiles: default **wiremock** (fast CI slice), optional **live** (`*IntegrationTest` only).
-- **Honest delivery**: failed Maven/static gate → ZIP contains reports only, not broken sources.
-- **LLM response cache** under `fixtures/*-llm-cache.json` for cheap local regression (`--use-cache --cheap`).
+- **Strict delivery**: failed Maven/static gate → ZIP contains reports only, not broken sources.
+- **Response cache** under `fixtures/*-gen-cache.json` for local regression without API calls (`--use-cache --cheap`).
 - **Structure fixers** without extra API calls (WireMock/Hamcrest clash, package alignment, integration test rename).
 
 ---
@@ -77,7 +107,7 @@ Protected paths cannot be overwritten by the model (`pom.xml`, `client/`, `dto/r
 | Area | Technology |
 |------|------------|
 | Bot / CLI | Python 3.11+, aiogram 3, asyncio |
-| Generation | Anthropic Messages API |
+| Code generation | Anthropic Messages API (configurable model) |
 | Generated tests | Java 17, JUnit 5, RestAssured 5, WireMock 3, Lombok, Jackson |
 | Build verification | Maven 3.9 (Eclipse Temurin 17 Docker image) |
 | Config | `python-dotenv`, `src/main/resources/config.properties` in ZIP |
@@ -91,7 +121,7 @@ Protected paths cannot be overwritten by the model (`pom.xml`, `client/`, `dto/r
 - Python 3.11+
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (daemon running) for `mvn test` validation
 - Telegram bot token ([@BotFather](https://t.me/BotFather)) if using the bot
-- Anthropic API key for generation
+- API key for the generation service (`ANTHROPIC_KEY`)
 
 ### Install
 
@@ -116,13 +146,13 @@ cp .env.example .env
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `TG_TOKEN` | Telegram bot | Bot token from BotFather |
-| `ANTHROPIC_KEY` | Generation | Anthropic API key |
+| `ANTHROPIC_KEY` | Generation | API key |
 | `ANTHROPIC_MODEL` | No | Default `claude-sonnet-4-6` |
 | `MAVEN_VALIDATION_ENABLED` | No | `true` — run Docker Maven |
-| `MAVEN_VALIDATION_STRICT` | No | `true` — warn when ZIP is not production-ready |
+| `MAVEN_VALIDATION_STRICT` | No | `true` — warn when ZIP failed Maven gate |
 | `MAVEN_DOCKER_IMAGE` | No | Default `maven:3.9-eclipse-temurin-17` |
 | `MAVEN_TIMEOUT_SEC` | No | Default `300` |
-| `MAVEN_MAX_RETRIES` | No | LLM regen attempts after Maven failure |
+| `MAVEN_MAX_RETRIES` | No | Regen attempts after Maven failure |
 | `USE_SCAFFOLD` | No | `true` — recommended |
 
 ### Run Telegram bot
@@ -137,9 +167,9 @@ python run_bot.py
 # Full pipeline
 python run_local.py --spec fixtures/httpbin-live-testing-api.json --base-url https://httpbin.org
 
-# Cached LLM output (no API cost)
+# Cached API output (no API cost)
 python run_local.py --spec fixtures/httpbin-live-testing-api.json \
-  --use-cache --cache fixtures/httpbin-llm-cache.json --base-url https://httpbin.org --cheap
+  --use-cache --cache fixtures/httpbin-gen-cache.json --base-url https://httpbin.org --cheap
 
 # Scaffold + gate + Maven only
 python run_local.py --spec fixtures/httpbin-nested-object-ref.json --scaffold-only
@@ -165,15 +195,15 @@ Override timeouts for slow public APIs: `-Dread.timeout=90000` (also set in the 
 | Command / action | Behavior |
 |------------------|----------|
 | `/start`, `/help` | Usage instructions |
-| Send `.json` | Parse OpenAPI; prompt for **base URL** |
+| `/status` | Quota and pending draft |
+| Send `.json` | Parse OpenAPI; profile → mode → base URL |
 | Reply with URL | e.g. `https://api.example.com/v1` |
 | `/skip` | Use `servers[0].url` from the spec |
-| `/cancel` | Cancel pending URL prompt |
-| *(wait)* | Pipeline runs; ZIP sent with status caption |
+| `/cancel` | Cancel pending job |
 
 **Status captions**
 
-- **Production-ready** — static gate OK and Docker `mvn test` succeeded with `Tests run > 0`.
+- **Ready** — static gate OK and Docker `mvn test` succeeded with `Tests run > 0`.
 - **Partial** — static gate OK, Maven failed or Docker unavailable (see `MAVEN_BUILD_REPORT.txt`).
 - **Failed** — static gate failed; ZIP may contain reports only.
 
@@ -185,12 +215,12 @@ Override timeouts for slow public APIs: `-Dread.timeout=90000` (also set in the 
 |------|------|
 | `qa_gen_bot/pipeline.py` | End-to-end orchestration |
 | `qa_gen_bot/scaffold.py` | Deterministic project skeleton |
-| `qa_gen_bot/generator.py` | LLM file generation |
+| `qa_gen_bot/generator.py` | Remote API file generation |
 | `qa_gen_bot/quality_gate.py` | Pre-Maven static validation |
 | `qa_gen_bot/maven_validator.py` | Docker `mvn test` |
 | `qa_gen_bot/structure_fixer.py` | Deterministic post-processing |
-| `fixtures/` | Sample OpenAPI specs and LLM caches |
-| `docs/` | Maintainer audit prompts (optional) |
+| `fixtures/` | Sample OpenAPI specs and generation caches |
+| `docs/` | Design notes (`adr-mode-b.md`) |
 
 ---
 

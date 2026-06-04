@@ -1,21 +1,22 @@
-"""End-to-end: scaffold + LLM → fixes → gate → Docker Maven → retry."""
+"""End-to-end: scaffold + API output → fixes → gate → Docker Maven → retry."""
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 
 from anthropic import AsyncAnthropic
 
 from qa_gen_bot.config import Settings
+from qa_gen_bot.core.models import GenerationResult
 from qa_gen_bot.generator import (
-    _llm_batch_ok,
+    _output_batch_ok,
     generate_framework,
     regenerate_with_feedback,
 )
 from qa_gen_bot.maven_validator import MavenValidationResult, validate_maven_project
 from qa_gen_bot.quality_gate import GateResult, validate_generated_project
-from qa_gen_bot.scaffold import build_scaffold, merge_with_scaffold, strip_llm_protected
+from qa_gen_bot.scaffold import build_scaffold, merge_with_scaffold, strip_generated_protected
 from qa_gen_bot.spec_parser import SpecAnalysis
+from qa_gen_bot.metrics import log_run_summary
 from qa_gen_bot.status_reporter import StatusReporter
 from qa_gen_bot.structure_fixer import (
     apply_all_structure_fixes,
@@ -24,57 +25,40 @@ from qa_gen_bot.structure_fixer import (
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class PipelineResult:
-    files: dict[str, str]
-    static_gate: GateResult
-    maven: MavenValidationResult | None
-    log: list[str] = field(default_factory=list)
-    elapsed_sec: int = 0
-    llm_files_raw: dict[str, str] | None = None
-
-    @property
-    def delivery_ready(self) -> bool:
-        if not self.static_gate.passed:
-            return False
-        if self.maven is None:
-            return True
-        if self.maven.skipped:
-            return False
-        return self.maven.passed
-
-    @property
-    def zip_shippable(self) -> bool:
-        """Deliverable ZIP only when static gate and Maven both pass."""
-        return self.delivery_ready
-
-    @property
-    def partial_success(self) -> bool:
-        return self.static_gate.passed and not self.delivery_ready
+# Backward-compatible alias for handlers, CLI, tests
+PipelineResult = GenerationResult
 
 
 def _finalize_files(
-    llm_files: dict[str, str],
+    generated_files: dict[str, str],
     scaffold: dict[str, str],
     use_scaffold: bool,
     base_package: str,
     log: list[str],
+    *,
+    uses_wiremock: bool,
 ) -> tuple[dict[str, str], GateResult]:
-    files = llm_files
+    files = generated_files
     if use_scaffold:
-        llm_stripped = strip_llm_protected(llm_files)
-        files = merge_with_scaffold(llm_stripped, scaffold)
-        log.append(f"Scaffold merge: {len(scaffold)} protected + {len(llm_stripped)} от LLM")
+        stripped = strip_generated_protected(
+            generated_files, uses_wiremock=uses_wiremock
+        )
+        files = merge_with_scaffold(
+            stripped, scaffold, uses_wiremock=uses_wiremock
+        )
+        log.append(f"Scaffold merge: {len(scaffold)} protected + {len(stripped)} доп.")
 
     fix = apply_all_structure_fixes(
-        files, base_package, scaffold if use_scaffold else None
+        files,
+        base_package,
+        scaffold if use_scaffold else None,
+        uses_wiremock=uses_wiremock,
     )
     if fix.applied:
         log.extend(f"Auto-fix: {a}" for a in fix.applied)
     files = fix.files
 
-    gate = validate_generated_project(files)
+    gate = validate_generated_project(files, uses_wiremock=uses_wiremock)
     return files, gate
 
 
@@ -85,14 +69,21 @@ async def run_pipeline(
     settings: Settings,
     *,
     reporter: StatusReporter | None = None,
-    llm_files_preloaded: dict[str, str] | None = None,
-    llm_cache_path: str | None = None,
+    files_preloaded: dict[str, str] | None = None,
+    cache_path: str | None = None,
     base_url_override: str | None = None,
 ) -> PipelineResult:
     log: list[str] = []
     base_package = f"com.{analysis.package_hint}"
+    uses_wiremock = settings.uses_wiremock
+    log.append(f"generation_profile={settings.generation_profile}")
+
     scaffold = (
-        build_scaffold(analysis, base_url_override=base_url_override)
+        build_scaffold(
+            analysis,
+            base_url_override=base_url_override,
+            uses_wiremock=uses_wiremock,
+        )
         if settings.use_scaffold
         else {}
     )
@@ -117,53 +108,61 @@ async def run_pipeline(
             model=settings.model,
             max_tokens=settings.max_tokens,
             max_retries=settings.max_retries,
+            uses_wiremock=uses_wiremock,
+            anthropic_timeout_sec=settings.anthropic_timeout_sec,
+            anthropic_api_max_retries=settings.anthropic_api_max_retries,
             on_progress=progress if reporter else None,
         )
 
     gen_status: GateResult | None = None
 
-    if llm_files_preloaded is not None:
-        llm_files = llm_files_preloaded
+    if files_preloaded is not None:
+        generated_files = files_preloaded
         gen_log = [
-            f"LLM: загружен из кэша ({len(llm_files)} файлов)"
-            + (f" — {llm_cache_path}" if llm_cache_path else "")
+            f"Кэш: загружено {len(generated_files)} файлов"
+            + (f" — {cache_path}" if cache_path else "")
         ]
         log.extend(gen_log)
         if reporter:
-            await progress("Генерация", "из кэша")
+            await progress("Сборка", "из кэша")
     else:
         if reporter:
-            llm_files, gen_status, gen_log = await reporter.run_with_heartbeat(
-                "Генерация",
+            generated_files, gen_status, gen_log = await reporter.run_with_heartbeat(
+                "Сборка",
                 "",
                 _generate(),
             )
         else:
-            llm_files, gen_status, gen_log = await _generate()
+            generated_files, gen_status, gen_log = await _generate()
         log.extend(gen_log)
 
-    batch_ok = _llm_batch_ok(llm_files)
+    batch_ok = _output_batch_ok(generated_files, uses_wiremock=uses_wiremock)
     if not batch_ok and (gen_status is None or not gen_status.passed):
         fail_gate = gen_status or GateResult(
             passed=False,
-            errors=["Недостаточно файлов от модели — нет минимального набора Java-тестов."],
+            errors=["Недостаточно файлов — нет минимального набора Java-тестов."],
         )
-        log.append("Стоп: генерация не дала минимальный batch (LLM batch check).")
-        await progress("Ошибка", "генерация")
+        log.append("Стоп: недостаточно тестовых файлов в ответе.")
+        await progress("Ошибка", "сборка")
         return PipelineResult(
-            files=llm_files,
+            files=generated_files,
             static_gate=fail_gate,
             maven=None,
             log=log,
             elapsed_sec=reporter.elapsed_sec if reporter else 0,
-            llm_files_raw=dict(llm_files),
+            generated_files_raw=dict(generated_files),
         )
 
-    llm_files_raw = dict(llm_files)
+    generated_files_raw = dict(generated_files)
 
     await progress("Сборка", "")
     files, gate = _finalize_files(
-        llm_files, scaffold, settings.use_scaffold, base_package, log
+        generated_files,
+        scaffold,
+        settings.use_scaffold,
+        base_package,
+        log,
+        uses_wiremock=uses_wiremock,
     )
 
     if not gate.passed:
@@ -174,7 +173,7 @@ async def run_pipeline(
             maven=None,
             log=log,
             elapsed_sec=reporter.elapsed_sec if reporter else 0,
-            llm_files_raw=llm_files_raw,
+            generated_files_raw=generated_files_raw,
         )
 
     if not settings.maven_validation_enabled:
@@ -185,7 +184,7 @@ async def run_pipeline(
             maven=None,
             log=log,
             elapsed_sec=reporter.elapsed_sec if reporter else 0,
-            llm_files_raw=llm_files_raw,
+            generated_files_raw=generated_files_raw,
         )
 
     async def _maven(files_map: dict[str, str]) -> MavenValidationResult:
@@ -197,6 +196,7 @@ async def run_pipeline(
             files_map,
             docker_image=settings.maven_docker_image,
             timeout_sec=settings.maven_timeout_sec,
+            maven_extra_args=[],
             on_progress=maven_detail if reporter else None,
         )
         if reporter:
@@ -218,7 +218,7 @@ async def run_pipeline(
             maven=maven,
             log=log,
             elapsed_sec=reporter.elapsed_sec if reporter else 0,
-            llm_files_raw=llm_files_raw,
+            generated_files_raw=generated_files_raw,
         )
 
     if maven.skipped:
@@ -229,11 +229,13 @@ async def run_pipeline(
             maven=maven,
             log=log,
             elapsed_sec=reporter.elapsed_sec if reporter else 0,
-            llm_files_raw=llm_files_raw,
+            generated_files_raw=generated_files_raw,
         )
 
-    # Local autofix pass before paid LLM regen
-    autofix = autofix_from_maven_log(files, maven.log_tail, base_package)
+    # Local autofix before API regen
+    autofix = autofix_from_maven_log(
+        files, maven.log_tail, base_package, uses_wiremock=uses_wiremock
+    )
     if autofix.applied:
         log.extend(f"Maven auto-fix: {a}" for a in autofix.applied)
         await progress("Maven", "повтор")
@@ -243,6 +245,7 @@ async def run_pipeline(
             settings.use_scaffold,
             base_package,
             log,
+            uses_wiremock=uses_wiremock,
         )
         maven = await _maven(files)
         log.append(f"После auto-fix: {maven.summary()}")
@@ -254,10 +257,12 @@ async def run_pipeline(
                 maven=maven,
                 log=log,
                 elapsed_sec=reporter.elapsed_sec if reporter else 0,
-                llm_files_raw=llm_files_raw,
+                generated_files_raw=generated_files_raw,
             )
 
-    from qa_gen_bot.prompts import MAVEN_RETRY_HINT
+    from qa_gen_bot.prompts import get_maven_retry_hint
+
+    maven_hint = get_maven_retry_hint(uses_wiremock=uses_wiremock)
 
     for attempt in range(1, settings.maven_max_retries + 1):
         await progress("Исправление", f"попытка {attempt}")
@@ -268,24 +273,32 @@ async def run_pipeline(
                 analysis,
                 spec_content,
                 existing_files=files,
-                feedback=MAVEN_RETRY_HINT + "\n\n" + maven.feedback_for_llm(),
+                feedback=maven_hint + "\n\n" + maven.feedback_for_regen(),
                 model=settings.model,
                 max_tokens=settings.max_tokens,
+                uses_wiremock=uses_wiremock,
+                anthropic_timeout_sec=settings.anthropic_timeout_sec,
+                anthropic_api_max_retries=settings.anthropic_api_max_retries,
                 on_progress=progress if reporter else None,
             )
 
         if reporter:
-            llm_files, _, gen_log = await reporter.run_with_heartbeat(
+            generated_files, _, gen_log = await reporter.run_with_heartbeat(
                 "Исправление",
                 "",
                 _regen(),
             )
         else:
-            llm_files, _, gen_log = await _regen()
+            generated_files, _, gen_log = await _regen()
         log.extend(gen_log)
 
         files, gate = _finalize_files(
-            llm_files, scaffold, settings.use_scaffold, base_package, log
+            generated_files,
+            scaffold,
+            settings.use_scaffold,
+            base_package,
+            log,
+            uses_wiremock=uses_wiremock,
         )
         if not gate.passed:
             break
@@ -296,11 +309,19 @@ async def run_pipeline(
             await progress("Готово", "")
             break
 
-    return PipelineResult(
+    result = PipelineResult(
         files=files,
         static_gate=gate,
         maven=maven,
         log=log,
         elapsed_sec=reporter.elapsed_sec if reporter else 0,
-        llm_files_raw=llm_files_raw,
+        generated_files_raw=generated_files_raw,
     )
+    log_run_summary(
+        mode="quick_start",
+        profile=settings.generation_profile,
+        segment=settings.segment,
+        delivery_ready=result.delivery_ready,
+        elapsed_sec=result.elapsed_sec,
+    )
+    return result

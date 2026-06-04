@@ -48,6 +48,7 @@ class T {{
         True,
         pkg,
         log,
+        uses_wiremock=True,
     )
 
     base_content = files[base_path]

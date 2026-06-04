@@ -1,11 +1,11 @@
-"""Save/load LLM file maps to avoid paid API calls while iterating on fixers."""
+"""Save/load generated file maps for local iteration without API calls."""
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
 
-def save_llm_cache(
+def save_gen_cache(
     path: Path,
     *,
     spec_path: str,
@@ -22,7 +22,7 @@ def save_llm_cache(
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_llm_cache(
+def load_gen_cache(
     path: Path,
     *,
     expected_package_hint: str | None = None,
@@ -35,7 +35,7 @@ def load_llm_cache(
     if expected_package_hint and hint != expected_package_hint:
         raise ValueError(
             f"Cache package_hint={hint!r} does not match spec {expected_package_hint!r}. "
-            f"Use --cache fixtures/{expected_package_hint}-llm-cache.json"
+            f"Use --cache fixtures/{expected_package_hint}-gen-cache.json"
         )
     pkg_path = f"com/{expected_package_hint}/" if expected_package_hint else None
     out: dict[str, str] = {}

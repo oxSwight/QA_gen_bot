@@ -3,7 +3,7 @@ from qa_gen_bot.structure_fixer import sync_client_dto_type
 BASE = "com.demo"
 
 
-def test_client_uses_llm_dto_name():
+def test_client_uses_generated_dto_name():
     files = {
         "src/test/java/com/demo/client/ProductsApiClient.java": """
 package com.demo.client;

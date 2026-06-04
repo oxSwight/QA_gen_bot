@@ -6,9 +6,12 @@ import logging
 import re
 import tempfile
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from qa_gen_bot.safe_paths import filter_safe_file_map, require_safe_file_map
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +51,8 @@ class MavenValidationResult:
             return f"Maven: BUILD SUCCESS{extra}"
         return "Maven: BUILD FAILURE\n" + "\n".join(f"  • {e}" for e in self.errors)
 
-    def feedback_for_llm(self, max_chars: int = 6_000) -> str:
-        """Compact log excerpt for model retry."""
+    def feedback_for_regen(self, max_chars: int = 6_000) -> str:
+        """Compact log excerpt for API retry."""
         tail = self.log_tail[-max_chars:] if self.log_tail else ""
         return (
             f"exit_code={self.exit_code}\n"
@@ -74,10 +77,33 @@ async def is_docker_available() -> bool:
 
 
 def _write_project_to_disk(files: dict[str, str], root: Path) -> None:
-    for rel_path, content in files.items():
-        target = root / rel_path.replace("\\", "/")
+    safe_files = require_safe_file_map(files, context="maven_disk")
+    root_resolved = root.resolve()
+    for rel_path, content in safe_files.items():
+        target = (root / rel_path).resolve()
+        if not str(target).startswith(str(root_resolved)):
+            logger.error("Path escapes maven temp root: %s", rel_path)
+            raise ValueError(f"Unsafe path for Maven workspace: {rel_path}")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8", newline="\n")
+
+
+async def _docker_force_stop(container_name: str) -> None:
+    """Stop orphaned Maven container after CLI timeout (proc.kill is not enough)."""
+    for cmd in (
+        ["docker", "kill", container_name],
+        ["docker", "rm", "-f", container_name],
+    ):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=30)
+            logger.info("Docker cleanup: %s (exit %s)", " ".join(cmd), proc.returncode)
+        except (OSError, asyncio.TimeoutError) as exc:
+            logger.warning("Docker cleanup failed %s: %s", cmd, exc)
 
 
 def _docker_volume_arg(host_path: Path) -> str:
@@ -182,6 +208,7 @@ async def validate_maven_project(
     *,
     docker_image: str,
     timeout_sec: int,
+    maven_extra_args: list[str] | None = None,
     on_progress: Callable[[str], Awaitable[None]] | None = None,
 ) -> MavenValidationResult:
     if not _has_pom(files):
@@ -197,22 +224,36 @@ async def validate_maven_project(
             skip_reason="Docker недоступен (установи Docker Desktop и запусти daemon).",
         )
 
+    safe_files, rejected = filter_safe_file_map(files, context="maven_validate")
+    if rejected:
+        return MavenValidationResult(
+            passed=False,
+            errors=[
+                f"Небезопасные пути в проекте ({len(rejected)}): "
+                + ", ".join(rejected[:3])
+            ],
+        )
+
+    container_name = f"qa_gen_maven_{uuid.uuid4().hex[:12]}"
+
     with tempfile.TemporaryDirectory(prefix="qa_gen_maven_") as tmp:
         root = Path(tmp)
-        await asyncio.to_thread(_write_project_to_disk, files, root)
+        await asyncio.to_thread(_write_project_to_disk, safe_files, root)
 
+        goals = maven_extra_args if maven_extra_args else ["test"]
+        mvn_args = ["mvn", "-B", *goals]
         cmd = [
             "docker",
             "run",
             "--rm",
+            "--name",
+            container_name,
             "-v",
             _docker_volume_arg(root),
             "-w",
             "/project",
             docker_image,
-            "mvn",
-            "-B",
-            "test",
+            *mvn_args,
         ]
         logger.info("Maven validation: %s", " ".join(cmd[:8]))
         if on_progress:
@@ -230,12 +271,18 @@ async def validate_maven_project(
         except asyncio.TimeoutError:
             if proc:
                 proc.kill()
+            await _docker_force_stop(container_name)
+            logger.error(
+                "Maven Docker timeout after %ss; container %s force-stopped",
+                timeout_sec,
+                container_name,
+            )
             return MavenValidationResult(
                 passed=False,
                 exit_code=-1,
                 duration_sec=float(timeout_sec),
                 errors=[f"Таймаут Maven ({timeout_sec}s). Упрости проект или увеличь MAVEN_TIMEOUT_SEC."],
-                log_tail="Timeout",
+                log_tail="Timeout (Docker container stopped)",
             )
 
         duration = time.monotonic() - started

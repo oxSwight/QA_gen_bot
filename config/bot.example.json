@@ -1,0 +1,6 @@
+{
+  "default_generation_profile": "contract-mocks",
+  "default_generation_mode": "quick_start",
+  "segment": "startup",
+  "tester_max_runs": 5
+}

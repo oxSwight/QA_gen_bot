@@ -32,12 +32,14 @@ async def main() -> None:
     if settings.maven_validation_enabled and not docker_ok:
         logger.warning(
             "Docker unavailable — Maven validation will be skipped. "
-            "Start Docker Desktop for production-ready builds."
+            "Start Docker Desktop for Maven validation in Docker."
         )
 
     logger.info(
-        "QA Gen Bot started | model=%s | maven=%s | docker=%s",
+        "QA Gen Bot started | model=%s | profile=%s | segment=%s | maven=%s | docker=%s",
         settings.model,
+        settings.generation_profile,
+        settings.segment or "-",
         "on" if settings.maven_validation_enabled else "off",
         "ok" if docker_ok else "missing",
     )
