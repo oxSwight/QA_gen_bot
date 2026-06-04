@@ -407,6 +407,30 @@ def nested_request_dto_names(analysis: SpecAnalysis) -> list[str]:
     return names
 
 
+def put_update_on_collection_body_only(analysis: SpecAnalysis) -> bool:
+    """
+    True when PUT on /{resource} updates by body (no path id), e.g. Petstore updatePet on /pet.
+    """
+    resource = _primary_resource(analysis)
+    collection = f"/{resource}"
+    paths = analysis.raw_json.get("paths") or {}
+    if not isinstance(paths, dict):
+        return False
+    path_item = paths.get(collection)
+    if not isinstance(path_item, dict):
+        return False
+    put_op = path_item.get("put")
+    if not isinstance(put_op, dict):
+        return False
+    for raw in (path_item.get("parameters") or []) + (put_op.get("parameters") or []):
+        if not isinstance(raw, dict):
+            continue
+        param = _resolve_parameter(raw, analysis.raw_json) or raw
+        if param.get("in") == "path":
+            return False
+    return True
+
+
 def _path_id_metadata(analysis: SpecAnalysis) -> tuple[str, str, str]:
     """(javaType, paramName, restAssuredPathSuffix) e.g. String, orderId, /{orderId}."""
     for op in analysis.operations:
@@ -673,7 +697,12 @@ def _build_api_client_source(
         return _render_operation_api_client(
             analysis, pkg, client_class, dto_input, resource
         )
-    return _render(_load_template("ApiClient.java"), vars_map)
+    template = (
+        "ApiClientUpdateBody.java"
+        if put_update_on_collection_body_only(analysis)
+        else "ApiClient.java"
+    )
+    return _render(_load_template(template), vars_map)
 
 
 def _normalize_path(path: str) -> str:

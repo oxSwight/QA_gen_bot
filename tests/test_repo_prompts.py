@@ -10,7 +10,8 @@ from qa_gen_bot.prompts import (
 def test_repo_system_prompt_differs_from_quick_start() -> None:
     repo = get_system_prompt(uses_wiremock=True, repo_mode=True)
     quick = get_system_prompt(uses_wiremock=True, repo_mode=False)
-    assert "openapi-generator" in repo
+    assert "schemas" in repo.lower()
+    assert "src/test/java" not in repo.lower() or "не возвращай" in repo.lower()
     assert "ApiClient" in quick or "client" in quick.lower()
     assert repo != quick
 

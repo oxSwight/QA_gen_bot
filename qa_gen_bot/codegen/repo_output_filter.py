@@ -29,6 +29,14 @@ def filter_repo_generated_files(files: dict[str, str]) -> dict[str, str]:
             if any(frag in norm for frag in _FORBIDDEN_FRAGMENTS if frag != "pom.xml"):
                 dropped.append(norm)
                 continue
+            # Tests come from repo scaffold (fluent DefaultApi); LLM often breaks compile.
+            if (
+                norm.startswith("src/test/java/")
+                and "/tests/" in norm
+                and norm.endswith(".java")
+            ):
+                dropped.append(norm)
+                continue
             kept[norm] = content
             continue
         dropped.append(norm)

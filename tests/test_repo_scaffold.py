@@ -15,7 +15,18 @@ SPEC = """
 def test_repo_scaffold_has_codegen_pom() -> None:
     analysis = parse_spec_content(SPEC)
     files = build_repo_scaffold(analysis, SPEC, uses_wiremock=True)
-    assert "openapi-generator-maven-plugin" in files["pom.xml"]
+    pom = files["pom.xml"]
+    assert "openapi-generator-maven-plugin" in pom
+    assert "library>rest-assured</library>" in pom
+    for dep in (
+        "com.google.code.gson",
+        "io.gsonfire",
+        "com.squareup.okio",
+        "javax.annotation-api",
+        "io.rest-assured",
+        "org.slf4j",
+    ):
+        assert dep in pom, f"missing dependency marker: {dep}"
     assert any("WireMockBaseTest" in p for p in files)
     assert files["src/main/resources/openapi/openapi.json"].strip().startswith("{")
 

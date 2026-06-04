@@ -570,8 +570,54 @@ _TEST_DTO_BY_CLASS = (
 )
 
 
+def _client_update_uses_path_id(files: dict[str, str]) -> bool:
+    for path, content in files.items():
+        p = _norm(path)
+        if "/client/" not in p or not p.endswith("ApiClient.java"):
+            continue
+        if re.search(r'\.put\s*\(\s*BASE\s*\+\s*"(/\{[^"]+\})"', content):
+            return True
+    return False
+
+
+def _client_update_is_body_only(files: dict[str, str]) -> bool:
+    for path, content in files.items():
+        p = _norm(path)
+        if "/client/" not in p or not p.endswith("ApiClient.java"):
+            continue
+        if re.search(r"public\s+Response\s+update\s*\(\s*\w+InputDto\s+body\s*\)", content):
+            return True
+    return False
+
+
+def fix_client_update_calls_for_body_only(files: dict[str, str]) -> FixResult:
+    """client.update(id, dto) -> client.update(dto) when scaffold PUT is on /pet only."""
+    if not _client_update_is_body_only(files):
+        return FixResult(files=dict(files), applied=[])
+    out = dict(files)
+    applied: list[str] = []
+    patterns = [
+        (r"client\.update\(\s*\w+\.getId\(\)\s*,\s*(\w+)\s*\)", r"client.update(\1)"),
+        (r"client\.update\(\s*\d+L?\s*,\s*(\w+)\s*\)", r"client.update(\1)"),
+        (r"client\.update\(\s*\w+Id\s*,\s*(\w+)\s*\)", r"client.update(\1)"),
+    ]
+    for path, content in list(out.items()):
+        p = _norm(path)
+        if not p.endswith("Test.java"):
+            continue
+        original = content
+        for pattern, repl in patterns:
+            content = re.sub(pattern, repl, content)
+        if content != original:
+            out[path] = content
+            applied.append(f"update(body) calls in {p}")
+    return FixResult(files=out, applied=applied)
+
+
 def fix_single_arg_client_update(files: dict[str, str]) -> FixResult:
-    """client.update(dto) -> client.update(id, dto) when id is set on builder."""
+    """client.update(dto) -> client.update(id, dto) only when client PUT uses path id."""
+    if not _client_update_uses_path_id(files):
+        return FixResult(files=dict(files), applied=[])
     out = dict(files)
     applied: list[str] = []
 
@@ -880,6 +926,7 @@ def apply_all_structure_fixes(
     fixers: list = [
         lambda f: normalize_junit_and_base_imports(f, base_package),
         move_response_dtos_to_main,
+        fix_client_update_calls_for_body_only,
         fix_single_arg_client_update,
         lambda f: align_packages_to_path(f, base_package),
         lambda f: fix_base_class_extends(f, base_package),

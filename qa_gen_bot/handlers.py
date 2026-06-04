@@ -189,13 +189,9 @@ async def _run_and_deliver_zip_locked(
         )
 
         if settings.maven_validation_strict and not result.delivery_ready:
-            zip_note = (
-                "В ZIP только отчёты (исходники не включены)."
-                if not result.zip_shippable
-                else "ZIP отправлен, но Maven-проверка не пройдена."
-            )
             await message.answer(
-                f"Проверка не пройдена. {zip_note} Подробности в ZIP.",
+                "Maven не прошёл — в ZIP проект + отчёты (см. MAVEN_BUILD_REPORT.txt). "
+                "Исправь локально или запусти генерацию снова.",
             )
 
         if not result.files:
@@ -217,7 +213,7 @@ async def _run_and_deliver_zip_locked(
             analysis_title=job.analysis.title,
             ops_count=len(job.analysis.operations),
             profile_label=job.generation_profile,
-            include_sources=result.zip_shippable,
+            include_sources=result.static_gate.passed and bool(result.files),
         )
 
         await message.answer_document(

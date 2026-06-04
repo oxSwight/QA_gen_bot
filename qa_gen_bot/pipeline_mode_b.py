@@ -86,7 +86,8 @@ async def run_repo_mode(
         uses_wiremock=uses_wiremock,
     )
 
-    async def _generate():
+    async def _generate_optional_schemas():
+        """Schemas only from API; Java tests are deterministic in repo scaffold."""
         return await generate_framework(
             client,
             analysis,
@@ -101,17 +102,28 @@ async def run_repo_mode(
             on_progress=progress if reporter else None,
         )
 
-    if reporter:
-        generated_files, gen_status, gen_log = await reporter.run_with_heartbeat(
-            "Сборка",
-            "repo / tests only",
-            _generate(),
-        )
+    # Deterministic tests in scaffold; skip paid API unless preloaded cache.
+    if request.files_preloaded is not None:
+        generated_files = request.files_preloaded
+        gen_status = GateResult(passed=True)
+        gen_log = [
+            f"Кэш: {len(generated_files)} файлов (schemas)"
+            + (f" — {request.cache_path}" if request.cache_path else "")
+        ]
     else:
-        generated_files, gen_status, gen_log = await _generate()
+        generated_files = {}
+        gen_status = GateResult(passed=True)
+        gen_log = [
+            "Mode B: тесты из scaffold (DefaultApi fluent API), API для tests не вызывается"
+        ]
     log.extend(gen_log)
 
-    if not _output_batch_ok(generated_files, uses_wiremock=uses_wiremock, repo_mode=True):
+    merged_preview = _merge_repo_files(
+        scaffold, filter_repo_generated_files(generated_files)
+    )
+    if not _output_batch_ok(
+        merged_preview, uses_wiremock=uses_wiremock, repo_mode=False
+    ):
         fail_gate = gen_status or GateResult(
             passed=False,
             errors=["Недостаточно тестовых файлов (Mode B)."],

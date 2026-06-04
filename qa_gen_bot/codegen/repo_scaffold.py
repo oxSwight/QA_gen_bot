@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from qa_gen_bot.scaffold import _load_template, _render, _sample_path
+from qa_gen_bot.codegen.repo_tests import build_repo_tests
+from qa_gen_bot.scaffold import _load_template, _primary_resource, _render, _sample_path
 from qa_gen_bot.spec_parser import SpecAnalysis
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
@@ -30,6 +31,7 @@ def build_repo_scaffold(
         or "https://api.example.com/v1"
     )
     sample = _sample_path(analysis)
+    resource = _primary_resource(analysis)
     vars_map = {
         "PACKAGE": pkg,
         "PACKAGE_PATH": pkg.replace(".", "/"),
@@ -38,6 +40,7 @@ def build_repo_scaffold(
         "ARTIFACT_TITLE": analysis.title,
         "BASE_URL": base_url,
         "SAMPLE_PATH": sample.lstrip("/"),
+        "RESOURCE": resource,
     }
 
     pkg_path = vars_map["PACKAGE_PATH"]
@@ -75,7 +78,14 @@ def build_repo_scaffold(
         files[f"src/test/java/{pkg_path}/base/WireMockBaseTest.java"] = _render(
             _load_template("WireMockBaseTest.java"), vars_map
         )
+        files[f"src/test/java/{pkg_path}/base/RepoWireMockBaseTest.java"] = _render(
+            _load_template("RepoWireMockBaseTest.java"), vars_map
+        )
         files[f"src/test/java/{pkg_path}/tests/WireMock405Test.java"] = _render(
             _load_template("WireMock405Test.java"), vars_map
         )
+    files[f"src/test/java/{pkg_path}/base/RepoBaseTest.java"] = _render(
+        _load_template("RepoBaseTest.java"), vars_map
+    )
+    files.update(build_repo_tests(analysis, uses_wiremock=uses_wiremock))
     return files

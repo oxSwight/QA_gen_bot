@@ -5,6 +5,7 @@ from qa_gen_bot.scaffold import (
     build_scaffold,
     is_protected_path,
     merge_with_scaffold,
+    put_update_on_collection_body_only,
     uses_operation_centric_client,
 )
 from qa_gen_bot.spec_parser import parse_spec_content
@@ -181,3 +182,15 @@ def test_scaffold_protects_request_dto_from_generated_overwrite():
     merged = merge_with_scaffold({dto_key: custom}, scaffold)
     assert merged[dto_key] == scaffold[dto_key]
     assert "CustomDto" not in merged[dto_key]
+
+
+def test_petstore_update_put_on_collection_not_path_id():
+    raw = Path("fixtures/petstore-swagger-api.json").read_text(encoding="utf-8")
+    spec = parse_spec_content(raw)
+    assert put_update_on_collection_body_only(spec)
+    client = next(
+        v for k, v in build_scaffold(spec).items() if k.endswith("PetApiClient.java")
+    )
+    assert "public Response update(PetInputDto body)" in client
+    assert '.put(BASE + "/{id}"' not in client
+    assert ".put(BASE)" in client

@@ -7,6 +7,7 @@ from qa_gen_bot.scaffold import (
     _primary_resource,
     all_request_dto_class_names,
     nested_request_dto_names,
+    put_update_on_collection_body_only,
     uses_operation_centric_client,
 )
 from qa_gen_bot.spec_parser import SpecAnalysis
@@ -42,10 +43,17 @@ def build_scaffold_hints(analysis: SpecAnalysis, *, uses_wiremock: bool = True) 
             "  — НЕ вызывай getAll/getById/create/update/delete (их нет в client)\n"
         )
     else:
+        update_line = (
+            "  — update(Dto body): PUT /{resource}, id только в JSON-теле; "
+            "WireMock stub на /{resource}, не /{resource}/1\n"
+        ).format(resource=resource)
+        if not put_update_on_collection_body_only(analysis):
+            update_line = (
+                "  — getById/delete/update(id, …): id типа long для petId (не String)\n"
+            )
         client_hint = (
-            f"• ApiClient: {pkg}.client.{client} — только ресурс /{resource} "
-            f"(getAll, getById, create, update, delete)\n"
-            "  — getById/delete/update: id типа long для petId (не String)\n"
+            f"• ApiClient: {pkg}.client.{client} — getAll, getById, create, update, delete\n"
+            f"{update_line}"
         )
     wiremock_lines = ""
     if uses_wiremock:
@@ -93,10 +101,14 @@ def build_repo_codegen_hints(analysis: SpecAnalysis, *, uses_wiremock: bool = Tr
 === Mode B: openapi-generator (НЕ генерируй client/dto/pom) ===
 • Package: {pkg}
 • После mvn generate-sources:
-  - API: {pkg}.api.* (DefaultApi / *Api — смотри сгенерированные имена)
+  - API: {pkg}.api.DefaultApi — fluent Oper (НЕ вызывай api.method(arg1, arg2))
   - Models: {pkg}.model.*
+• Пример вызова:
+  DefaultApi api = DefaultApi._default(() -> new RequestSpecBuilder().setBaseUri(baseUri)...);
+  api.submitTestData().xTestHeaderHeader("h").body(payload).execute(r -> {{ r.then().statusCode(200); return r; }});
+  api.fetchTestData().mockIdQuery("id").execute(r -> {{ r.then().statusCode(200); return r; }});
+• Тесты в scaffold: RepoWireMockBaseTest / RepoBaseTest + api()
 • Операции из спеки:
 {op_lines}
-• BaseTest: {pkg}.base.BaseTest — live API на base.url
-{wiremock}• Доп. файлы: только src/test/java и schemas
+{wiremock}• Доп. файлы от API: только src/test/resources/schemas/*.json (опционально)
 """
